@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: seance-synchronisee
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: echo "aucune dependance a installer"
+    startCommand: node server.js
+    healthCheckPath: /config
+    envVars:
+      # Mode cloud : le service ne garde que l'horloge, les salles et le chat.
+      # Ni mediatheque (pas de disque a servir) ni proxy web (ce serait un
+      # relais ouvert sur Internet). Chacun lit sa propre copie du film.
+      - key: CLOUD
+        value: "1"
+      - key: NODE_VERSION
+        value: "22"

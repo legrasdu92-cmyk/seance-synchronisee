@@ -1,0 +1,14 @@
+{
+  "name": "seance-synchronisee",
+  "version": "1.1.0",
+  "description": "Regarder la meme video a la meme seconde, a plusieurs : horloge partagee, correction de derive, chat. Sans aucune dependance.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "cloud": "node -e \"process.env.CLOUD='1';require('./server.js')\""
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "private": true
+}

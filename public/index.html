@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Navigateur synchronisé</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#080b12">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="apple-touch-icon" href="/icone.png">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🍿</text></svg>">
+</head>
+<body>
+
+<!-- ------------------------------------------------------------- accueil -->
+<div id="join" class="join">
+  <form class="join-card" id="joinForm">
+    <div class="join-logo">🍿</div>
+    <h1>Séance synchronisée</h1>
+    <p class="muted">Même vidéo, même seconde, pour tout le monde.</p>
+    <label>Ton pseudo
+      <input id="joinName" maxlength="24" placeholder="Alex" autocomplete="off" required>
+    </label>
+    <label id="roomLabel">Salle
+      <input id="joinRoom" maxlength="32" placeholder="salon" autocomplete="off" spellcheck="false">
+    </label>
+    <button type="submit" class="primary big">Rejoindre la séance</button>
+    <button type="button" class="ghost big hidden" id="btnCreate">Créer une nouvelle séance</button>
+    <p class="join-hint muted" id="joinHint"></p>
+    <button type="button" class="ghost big hidden" id="btnInstall">Installer l'application</button>
+  </form>
+</div>
+
+<!-- ---------------------------------------------------------------- appli -->
+<div id="app" class="app hidden">
+
+  <header class="topbar">
+    <div class="brand"><span>🍿</span> <b id="roomName">salon</b></div>
+
+    <nav class="tabs">
+      <button class="tab active" data-mode="cinema">Cinéma</button>
+      <button class="tab" data-mode="web">Web partagé</button>
+    </nav>
+
+    <div class="topright">
+      <div class="pill" id="syncPill" title="Écart entre ton lecteur et l'horloge de la salle">
+        <span class="dot"></span><span id="syncText">synchro…</span>
+      </div>
+      <button class="ghost" id="btnInvite" title="Copier le lien à envoyer aux potes">Inviter</button>
+      <button class="ghost only-narrow" id="btnPanel" title="Afficher/masquer le panneau">☰</button>
+    </div>
+  </header>
+
+  <main class="main">
+    <section class="stage">
+
+      <!-- ------------------------------------------------ mode cinéma -->
+      <div id="cinema" class="pane">
+        <div class="player-wrap" id="playerWrap">
+          <video id="video" playsinline preload="auto"></video>
+          <div id="ytHolder" class="yt-holder hidden"><div id="ytPlayer"></div><div class="yt-shield"></div></div>
+
+          <div id="emptyState" class="empty">
+            <div class="empty-inner">
+              <h2>Aucune vidéo chargée</h2>
+              <p class="muted">Choisis une source : tout le monde suivra automatiquement.</p>
+              <button class="primary" id="btnOpenLib">Ouvrir la bibliothèque</button>
+              <p class="muted small drop-hint">…ou glisse un fichier vidéo dans la fenêtre</p>
+            </div>
+          </div>
+
+          <!-- mode « chacun sa copie » : il faut désigner le fichier local -->
+          <div id="localPick" class="overlay hidden">
+            <div class="pick-inner">
+              <h2>Ouvre ta copie du film</h2>
+              <p class="muted" id="pickName">—</p>
+              <label class="filebtn primary">Choisir le fichier…<input type="file" id="pickInput" accept="video/*,audio/*"></label>
+              <p class="muted small">Chacun lit sa propre copie depuis son disque : rien ne transite par le
+                réseau, seule l'horloge est partagée.</p>
+            </div>
+          </div>
+
+          <div id="waitOverlay" class="overlay hidden">
+            <div class="spinner"></div>
+            <p id="waitText">En attente des autres…</p>
+          </div>
+
+          <div id="unmute" class="unmute hidden">
+            <button class="primary" id="btnUnmute">🔊 Activer le son</button>
+          </div>
+
+          <div id="reactions" class="reactions"></div>
+        </div>
+
+        <div class="controls">
+          <button class="round" id="btnPlay" title="Lecture / pause (espace)">▶</button>
+          <button class="round small" id="btnBack10" title="-10 s">⟲</button>
+          <button class="round small" id="btnFwd10" title="+10 s">⟳</button>
+
+          <span class="time" id="curTime">0:00</span>
+          <div class="seek" id="seek">
+            <div class="seek-buffer" id="seekBuffer"></div>
+            <div class="seek-fill" id="seekFill"></div>
+            <div class="seek-knob" id="seekKnob"></div>
+          </div>
+          <span class="time" id="durTime">0:00</span>
+
+          <span class="vol">
+            <button class="iconbtn" id="btnMute" title="Couper le son (m)">🔊</button>
+            <input type="range" id="volume" min="0" max="1" step="0.01" value="1" title="Volume (local)">
+          </span>
+
+          <select id="rate" class="select" title="Vitesse de lecture (partagée)">
+            <option value="0.5">0.5×</option>
+            <option value="0.75">0.75×</option>
+            <option value="1" selected>1×</option>
+            <option value="1.25">1.25×</option>
+            <option value="1.5">1.5×</option>
+            <option value="2">2×</option>
+          </select>
+
+          <span class="subs">
+            <select id="subSel" class="select" title="Sous-titres (local)"><option value="-1">ST off</option></select>
+            <label class="iconbtn" title="Charger un .srt ou .vtt depuis ton disque">＋<input type="file" id="subInput" accept=".srt,.vtt"></label>
+          </span>
+
+          <button class="ghost" id="btnLib">Bibliothèque</button>
+          <button class="ghost" id="btnResync" title="Recaler l'horloge et se repositionner">Resynchro</button>
+          <button class="ghost" id="btnFull" title="Plein écran (f)">⛶</button>
+        </div>
+
+        <div class="nowplaying">
+          <b id="mediaTitle">—</b>
+          <span class="muted" id="mediaMeta"></span>
+          <button class="ghost tiny hidden" id="btnCloseMedia" title="Fermer la vidéo pour tout le monde">✕</button>
+        </div>
+      </div>
+
+      <!-- --------------------------------------------------- mode web -->
+      <div id="web" class="pane hidden">
+        <div class="urlbar">
+          <button class="round small" id="btnWebBack" title="Précédent">←</button>
+          <button class="round small" id="btnWebFwd" title="Suivant">→</button>
+          <button class="round small" id="btnWebReload" title="Recharger pour tout le monde">⟳</button>
+          <form id="urlForm"><input id="urlInput" placeholder="Cherche ou colle une adresse…" autocomplete="off" spellcheck="false"></form>
+          <label class="check" title="Tout le monde peut naviguer, pas seulement le pilote"><input type="checkbox" id="freeBrowse"> libre</label>
+        </div>
+        <div class="frame-wrap">
+          <!-- Pas d'attribut sandbox : selon le contexte d'imbrication, ses
+               drapeaux sont intersectés avec ceux du parent et le script de
+               relais cesse de s'exécuter — la synchro du mode web tombe alors
+               en panne silencieuse. L'isolation vient de la séparation
+               d'origines : l'appli vit sur localhost, les pages proxifiées sur
+               127.0.0.1, donc elles ne peuvent ni lire son stockage ni la
+               scripter. -->
+          <iframe id="frame" referrerpolicy="no-referrer"></iframe>
+          <div id="webEmpty" class="empty">
+            <div class="empty-inner">
+              <h2>Navigation partagée</h2>
+              <p class="muted">Le pilote navigue, tout le monde voit la même page — curseurs et défilement inclus.</p>
+              <div class="quick">
+                <button data-url="https://fr.wikipedia.org">Wikipédia</button>
+                <button data-url="https://www.arte.tv/fr/">ARTE</button>
+                <button data-url="https://duckduckgo.com">DuckDuckGo</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ------------------------------------------------------- panneau -->
+    <aside class="panel" id="panel">
+      <div class="panel-head">
+        <div class="seg">
+          <button class="seg-btn active" data-panel="people">Participants</button>
+          <button class="seg-btn" data-panel="chat">Chat <span class="unread hidden" id="unread"></span></button>
+        </div>
+      </div>
+
+      <div class="panel-body" id="peoplePane">
+        <ul class="people" id="people"></ul>
+        <div class="opt">
+          <button class="ghost wide hidden" id="btnTakeHost">Prendre le pilotage</button>
+          <label class="check"><input type="checkbox" id="waitAll" checked> Attendre tout le monde (anti-décalage)</label>
+          <label class="check"><input type="checkbox" id="autoSync" checked> Correction automatique de dérive</label>
+        </div>
+        <div class="diag" id="diag"></div>
+      </div>
+
+      <div class="panel-body hidden" id="chatPane">
+        <div class="chat" id="chat"></div>
+        <div class="emojis" id="emojis"><span>😂</span><span>😮</span><span>❤️</span><span>🔥</span><span>👏</span><span>😴</span></div>
+        <form id="chatForm"><input id="chatInput" placeholder="Écrire…" maxlength="500" autocomplete="off"><button class="primary">↑</button></form>
+      </div>
+    </aside>
+  </main>
+
+  <div id="toasts" class="toasts"></div>
+  <div id="offline" class="offline hidden">Connexion perdue — reconnexion…</div>
+  <div id="dropZone" class="dropzone hidden"><span>Déposer pour ouvrir ce fichier</span></div>
+</div>
+
+<!-- ------------------------------------------------------- bibliothèque -->
+<div id="library" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h2>Bibliothèque</h2>
+      <button class="ghost" id="btnCloseLib" title="Fermer (Échap)">✕</button>
+    </div>
+
+    <div class="lib-tabs">
+      <button class="lib-tab active" data-lib="files">Fichiers de l'hôte</button>
+      <button class="lib-tab" data-lib="local">Chacun sa copie</button>
+      <button class="lib-tab" data-lib="url">Lien direct</button>
+      <button class="lib-tab" data-lib="yt">YouTube</button>
+    </div>
+
+    <div class="lib-pane" id="libFiles">
+      <div class="lib-head">
+        <p class="muted small" id="libDir"></p>
+        <button class="ghost tiny" id="btnRefreshLib" title="Relire le dossier">⟳</button>
+      </div>
+      <ul class="files" id="files"></ul>
+      <p class="muted small">Dépose tes vidéos dans ce dossier côté hôte : elles sont diffusées en direct sur
+        le réseau local, chacun lit le même fichier. Le bon choix si vous êtes sous le même toit.</p>
+    </div>
+
+    <div class="lib-pane hidden" id="libLocal">
+      <p class="muted small">Vous avez déjà chacun le film sur votre disque ? Ce mode ne fait circuler que
+        l'horloge : aucune vidéo ne transite par le réseau. C'est la bonne option quand vous n'êtes pas sur
+        le même réseau, ou quand le fichier est trop lourd à diffuser.</p>
+      <label class="filebtn primary">Choisir mon fichier…<input type="file" id="localInput" accept="video/*,audio/*"></label>
+      <p class="muted small" id="localHint">Chaque participant devra désigner sa propre copie. L'appli
+        signale les fichiers dont la taille diffère — souvent le signe d'une version qui ne correspond pas.</p>
+    </div>
+
+    <div class="lib-pane hidden" id="libUrl">
+      <label>Adresse d'une vidéo (.mp4, .webm, .ogg)
+        <input id="urlMedia" placeholder="https://…/film.mp4" autocomplete="off">
+      </label>
+      <label>Sous-titres .srt ou .vtt (optionnel)
+        <input id="urlSub" placeholder="https://…/film.srt" autocomplete="off">
+      </label>
+      <button class="primary" id="btnLoadUrl">Charger pour tout le monde</button>
+      <p class="muted small">Chacun télécharge la vidéo de son côté, seule l'horloge est partagée.</p>
+    </div>
+
+    <div class="lib-pane hidden" id="libYt">
+      <label>Lien ou identifiant YouTube
+        <input id="ytUrl" placeholder="https://www.youtube.com/watch?v=…" autocomplete="off">
+      </label>
+      <button class="primary" id="btnLoadYt">Charger pour tout le monde</button>
+      <p class="muted small">La synchro YouTube se fait par recalage : le lecteur n'accepte pas les
+        micro-ajustements de vitesse, compte donc ~0,3 s de tolérance au lieu de quelques millisecondes.</p>
+    </div>
+  </div>
+</div>
+
+<script src="/sync.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

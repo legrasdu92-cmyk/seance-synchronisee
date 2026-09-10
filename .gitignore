@@ -1,0 +1,5 @@
+# Clé d'accès du mode local : propre à chaque machine, jamais versionnée.
+.acces
+# Vidéos servies en mode local.
+media/
+node_modules/
