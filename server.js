@@ -315,6 +315,7 @@ function newRoom(id) {
     stream: null, // { by, name, size, mime, token }
     pulls: new Map(), // reqId -> { res, start, end, size, mime, timer }
     pullSeq: 0,
+    sharer: null, // clientId qui partage son ecran (WebRTC), le cas echeant
   };
 }
 
@@ -354,6 +355,7 @@ function snapshot(room) {
     pending: !!room.pendingPlay,
     media: room.media,
     play: room.play,
+    sharer: room.sharer || null,
     serverTime: Date.now(),
     clients: [...room.clients.values()].map(publicClient),
     chat: room.chat.slice(-60),
@@ -546,6 +548,37 @@ function handleEvent(room, client, msg) {
       // Mode "fichier local" : le participant a designe sa copie du film.
       client.hasFile = !!msg.on;
       pushPresence(room);
+      break;
+    }
+    case 'share': {
+      // Partage d'ecran/onglet : le pilote diffuse ce qu'il voit (utile pour
+      // les sites que le proxy ne peut pas afficher, comme anime-sama). La
+      // video passe en pair-a-pair (WebRTC) ; le serveur ne fait que relayer
+      // les messages de signalisation.
+      if (!canDrive(room, client)) {
+        sse(client.res, 'toast', { text: 'Seul le pilote peut partager son écran.', tone: 'warn' });
+        break;
+      }
+      if (msg.on) {
+        room.sharer = client.id;
+        room.media = { kind: 'screen', src: String(Date.now()), title: 'Partage de ' + client.name, size: 0 };
+        setPaused(room, 0);
+        room.mode = 'cinema';
+        pushState(room);
+        system(room, client.name + ' partage son écran. Lance le direct chez tout le monde.');
+      } else if (room.sharer === client.id) {
+        room.sharer = null;
+        if (room.media && room.media.kind === 'screen') { room.media = null; setPaused(room, 0); }
+        pushState(room);
+        system(room, client.name + ' a arrêté le partage d\'écran.');
+      }
+      break;
+    }
+    case 'rtc': {
+      // Relais de signalisation WebRTC vers un participant precis (offre,
+      // reponse, candidats ICE). Contenu opaque pour le serveur.
+      const to = room.clients.get(String(msg.to || ''));
+      if (to) sse(to.res, 'rtc', { from: client.id, name: client.name, data: msg.data });
       break;
     }
     case 'clearMedia': {
@@ -1495,6 +1528,12 @@ const server = http.createServer((req, res) => {
         endStream(room);
         pushState(room);
         system(room, name + ' a quitté : la diffusion en direct est arrêtée.');
+      }
+      if (room.sharer === client.id) {
+        room.sharer = null;
+        if (room.media && room.media.kind === 'screen') { room.media = null; setPaused(room, 0); }
+        pushState(room);
+        system(room, name + ' a quitté : le partage d\'écran est arrêté.');
       }
       if (room.clients.size === 0) {
         // En cloud, une seance vide survit plus longtemps : le code doit

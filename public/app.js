@@ -137,6 +137,10 @@
       var d = JSON.parse(e.data);
       runCountdown(d.at, d.label);
     });
+    es.addEventListener('rtc', function (e) {
+      var d = JSON.parse(e.data);
+      if (window.__onRtc) window.__onRtc(d.from, d.name, d.data);
+    });
     es.addEventListener('cursor', function (e) {
       var d = JSON.parse(e.data);
       S.cursors[d.id] = { x: d.x, y: d.y, name: d.name, color: d.color, ts: Date.now() };
@@ -190,6 +194,13 @@
     if (key !== S.mediaKey) {
       S.mediaKey = key;
       loadMedia(st.media);
+    }
+
+    // partage d'ecran : etat du bouton
+    if ($('btnShare')) {
+      var iShare = st.sharer && st.sharer === S.clientId;
+      $('btnShare').classList.toggle('active', !!iShare);
+      $('btnShare').textContent = iShare ? '⏹ Arrêter le partage' : '🖥 Partager mon écran';
     }
 
     // lecture
@@ -250,6 +261,7 @@
     if (media.kind === 'local') return 'chacun sa copie · ' + bytes(media.size);
     if (media.kind === 'hosted') return 'diffusé par l\'hôte · ' + bytes(media.size);
     if (media.kind === 'stream') return 'en direct depuis l\'hôte · ' + bytes(media.size);
+    if (media.kind === 'screen') return 'partage d\'écran en direct';
     if (media.kind === 'youtube') return 'YouTube';
     return 'lien direct';
   }
@@ -259,6 +271,12 @@
     if (S.corrector) S.corrector.stop();
     S.corrector = null;
     S.adapter = null;
+    // Quitter un partage d'ecran : on detache le flux en direct et on ferme les
+    // connexions pair-a-pair (sauf si le nouveau media est encore un partage).
+    if (!media || media.kind !== 'screen') {
+      if (video.srcObject) { video.srcObject = null; }
+      if (!RTC.sharing) closeAllPeers();
+    }
     destroyYt();
     S.duration = 0;
     S.lastReady = null;
@@ -290,6 +308,17 @@
 
     $('ytHolder').classList.add('hidden');
     video.classList.remove('hidden');
+
+    // Partage d'ecran : la video arrive en direct par WebRTC (srcObject), il
+    // n'y a rien a synchroniser (c'est deja du direct). On (re)branche le mesh.
+    if (media.kind === 'screen') {
+      video.removeAttribute('src');
+      video.srcObject = null;
+      applyVolume();
+      setupScreenShare();
+      $('mediaMeta').textContent = 'partage d\'écran en direct';
+      return;
+    }
 
     // Mode "chacun sa copie" : sans fichier designe, on affiche le selecteur
     // et on s'arrete la - il n'y a rien a lire pour l'instant.
@@ -730,6 +759,120 @@
     if (!(S.cfg && S.cfg.cloud)) return '';
     return '&room=' + encodeURIComponent(S.room || '') + '&who=' + encodeURIComponent(S.clientId || '');
   }
+
+  // ------------------------------------------------- partage d'ecran (WebRTC) --
+  // Le pilote diffuse ce qu'il voit (utile pour les sites que le proxy ne peut
+  // pas afficher). La video circule en pair-a-pair ; le serveur ne relaie que
+  // la signalisation. Tout le monde voit exactement le meme direct, synchro.
+  var RTC = { peers: {}, stream: null, sharing: false };
+  var ICE = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] };
+
+  function rtcSend(to, data) { send({ type: 'rtc', to: to, data: data }); }
+
+  function closePeer(id) {
+    var p = RTC.peers[id];
+    if (p) { try { p.close(); } catch (e) {} delete RTC.peers[id]; }
+  }
+  function closeAllPeers() {
+    Object.keys(RTC.peers).forEach(closePeer);
+  }
+
+  function makePeer(id, asSharer) {
+    var pc = new RTCPeerConnection(ICE);
+    RTC.peers[id] = pc;
+    pc.onicecandidate = function (e) { if (e.candidate) rtcSend(id, { ice: e.candidate }); };
+    pc.onconnectionstatechange = function () {
+      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') closePeer(id);
+    };
+    if (asSharer && RTC.stream) {
+      RTC.stream.getTracks().forEach(function (t) { pc.addTrack(t, RTC.stream); });
+    } else {
+      // Cote spectateur : la piste entrante devient la video de la salle.
+      pc.ontrack = function (e) {
+        var video = $('video');
+        if (video.srcObject !== e.streams[0]) {
+          video.srcObject = e.streams[0];
+          video.muted = false;
+          var pr = video.play();
+          if (pr && pr.catch) pr.catch(function () { video.muted = true; $('unmute').classList.remove('hidden'); video.play().catch(function () {}); });
+        }
+      };
+    }
+    return pc;
+  }
+
+  // Appele quand le media de la salle devient un partage d'ecran.
+  function setupScreenShare() {
+    var iAmSharer = S.state && S.state.sharer === S.clientId;
+    if (iAmSharer) {
+      // Je suis la source : j'affiche mon propre flux (muet, pour eviter l'echo)
+      // et j'attends que chaque spectateur me demande le direct.
+      if (RTC.stream) {
+        var v = $('video'); v.srcObject = RTC.stream; v.muted = true; v.play().catch(function () {});
+      }
+    } else {
+      // Spectateur : je demande le flux au partageur.
+      var sharer = S.state && S.state.sharer;
+      if (sharer) rtcSend(sharer, { want: true });
+    }
+  }
+
+  window.__onRtc = function (from, name, data) {
+    if (!data) return;
+    var iAmSharer = S.state && S.state.sharer === S.clientId;
+    if (data.want && iAmSharer && RTC.stream) {
+      // Un spectateur demande le direct : je cree une connexion et j'offre.
+      closePeer(from);
+      var pc = makePeer(from, true);
+      pc.createOffer().then(function (o) { return pc.setLocalDescription(o); })
+        .then(function () { rtcSend(from, { sdp: pc.localDescription }); }).catch(function () {});
+      return;
+    }
+    if (data.sdp) {
+      var pc2 = RTC.peers[from];
+      if (data.sdp.type === 'offer') {
+        // Spectateur : je recois l'offre du partageur.
+        pc2 = makePeer(from, false);
+        pc2.setRemoteDescription(data.sdp)
+          .then(function () { return pc2.createAnswer(); })
+          .then(function (a) { return pc2.setLocalDescription(a); })
+          .then(function () { rtcSend(from, { sdp: pc2.localDescription }); }).catch(function () {});
+      } else if (pc2) {
+        pc2.setRemoteDescription(data.sdp).catch(function () {});
+      }
+      return;
+    }
+    if (data.ice) {
+      var pc3 = RTC.peers[from];
+      if (pc3) pc3.addIceCandidate(data.ice).catch(function () {});
+    }
+  };
+
+  function startShare() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+      toast('Ton navigateur ne permet pas le partage d\'écran ici.', 'warn', 6000);
+      return;
+    }
+    navigator.mediaDevices.getDisplayMedia({ video: true, audio: true }).then(function (stream) {
+      RTC.stream = stream;
+      RTC.sharing = true;
+      // Si l'utilisateur arrete via la barre du navigateur, on coupe proprement.
+      stream.getVideoTracks()[0].addEventListener('ended', stopShare);
+      send({ type: 'share', on: true });
+      toast('Partage lancé. Tout le monde voit ton écran en direct.', null, 5000);
+    }).catch(function () { /* l'utilisateur a annule */ });
+  }
+
+  function stopShare() {
+    if (RTC.stream) { RTC.stream.getTracks().forEach(function (t) { try { t.stop(); } catch (e) {} }); RTC.stream = null; }
+    RTC.sharing = false;
+    closeAllPeers();
+    send({ type: 'share', on: false });
+  }
+
+  if ($('btnShare')) $('btnShare').onclick = function () {
+    if (RTC.sharing) stopShare(); else startShare();
+  };
 
   // Top depart synchronise : l'instant "at" est en heure serveur ; grace a
   // l'horloge partagee, le GO tombe au meme instant pour tout le monde.
