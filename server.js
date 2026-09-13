@@ -205,6 +205,8 @@ function publicClient(c) {
     name: c.name,
     color: c.color,
     ready: c.ready,
+    // pourquoi ce participant n'est pas pret, quand son lecteur a echoue
+    error: c.error || null,
     drift: c.drift,
     rtt: c.rtt,
     buffered: c.buffered,
@@ -381,6 +383,7 @@ function handleEvent(room, client, msg) {
         room.duration = 0;
         for (const c of room.clients.values()) {
           c.ready = false;
+          c.error = null;
           c.hasFile = next.kind !== 'local' ? true : c.id === client.id;
         }
       }
@@ -403,6 +406,7 @@ function handleEvent(room, client, msg) {
       room.stalled.clear();
       for (const c of room.clients.values()) {
         c.ready = false;
+        c.error = null;
         c.hasFile = false;
       }
       setPaused(room, 0);
@@ -415,6 +419,16 @@ function handleEvent(room, client, msg) {
       client.ready = !!msg.ready;
       client.buffered = Number(msg.buffered) || 0;
       noteDuration(room, msg.duration);
+      // Echec de lecture (lien mort, format inconnu) : on le retient tant que
+      // le participant n'est pas redevenu pret, et on le dit une fois a tous -
+      // sinon la salle reste sur "on attend X" sans que personne sache pourquoi.
+      if (client.ready) {
+        client.error = null;
+      } else if (msg.error) {
+        const err = String(msg.error).slice(0, 120);
+        if (client.error !== err) system(room, client.name + ' ne peut pas lire cette video : ' + err);
+        client.error = err;
+      }
       if (client.ready && !was) {
         room.stalled.delete(client.id);
         if (room.pendingPlay && everyoneReady(room)) {
@@ -1077,6 +1091,7 @@ const server = http.createServer((req, res) => {
         color: pickColor(room),
         res,
         ready: false,
+        error: null,
         drift: 0,
         rtt: 0,
         buffered: 0,
@@ -1243,19 +1258,33 @@ setInterval(() => {
 setInterval(() => {
   for (const room of rooms.values()) {
     if (!room.pendingPlay) continue;
-    if (Date.now() - (room.pendingSince || 0) < 15000) continue;
+    const clients = [...room.clients.values()];
+    // Ceux qui manquent ont-ils tous echoue (lien mort, format inconnu) ?
+    // Alors attendre 15 s n'apporte rien : on sait deja qu'ils ne viendront pas.
+    const onlyFailures = clients.every((c) => c.ready || c.error);
+    if (!onlyFailures && Date.now() - (room.pendingSince || 0) < 15000) continue;
+    // Et si personne ne peut lire, demarrer reviendrait a faire tourner le
+    // compteur devant des ecrans noirs : on laisse le voile expliquer le
+    // probleme jusqu'a ce que le pilote change de source.
+    if (onlyFailures && !clients.some((c) => c.ready)) continue;
     // Exception : en mode "fichier local", quelqu'un qui n'a pas encore
     // designe sa copie ne bufferise pas, il n'a rien a lire. Demarrer sans
     // lui n'aurait aucun sens, on continue d'attendre.
     if (room.media && room.media.kind === 'local') {
       let missing = false;
-      for (const c of room.clients.values()) if (!c.hasFile) missing = true;
+      for (const c of clients) if (!c.hasFile) missing = true;
       if (missing) continue;
     }
     room.pendingPlay = false;
     setPlaying(room, room.play.position);
     pushState(room);
-    system(room, 'Attente trop longue : la lecture repart sans les retardataires.');
+    const stuck = clients.filter((c) => !c.ready).map((c) => c.name);
+    system(
+      room,
+      onlyFailures
+        ? 'La lecture demarre sans ' + stuck.join(', ') + ' (lecture impossible chez eux).'
+        : 'Attente trop longue : la lecture repart sans les retardataires.'
+    );
   }
 }, 2000);
 

@@ -157,6 +157,9 @@ label input { margin-top: 5px; }
   animation: spin .8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* echec de lecture chez quelqu'un : attendre ne sert plus a rien */
+.overlay.failed .spinner { display: none; }
+.overlay.failed #waitText { color: var(--warn); max-width: 460px; text-align: center; line-height: 1.5; }
 
 .unmute { position: absolute; z-index: 6; bottom: 18px; left: 50%; transform: translateX(-50%); }
 

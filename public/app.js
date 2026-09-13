@@ -51,7 +51,7 @@
     return n.toFixed(i > 1 ? 1 : 0) + ' ' + u[i];
   }
 
-  function toast(text, tone) {
+  function toast(text, tone, ms) {
     var el = document.createElement('div');
     el.className = 'toast' + (tone ? ' ' + tone : '');
     el.textContent = text;
@@ -60,7 +60,7 @@
       el.style.opacity = '0';
       el.style.transition = 'opacity .3s';
       setTimeout(function () { el.remove(); }, 320);
-    }, 2800);
+    }, ms || 2800);
   }
 
   function send(msg) {
@@ -454,14 +454,17 @@
 
   // -------------------------------------------------- pret / bufferisation --
 
-  function reportReady(ready, buffered) {
-    if (S.lastReady === ready) return;
+  function reportReady(ready, buffered, error) {
+    // Un echec est toujours transmis, meme si on etait deja "pas pret" : c'est
+    // lui qui explique aux autres pourquoi la salle attend.
+    if (S.lastReady === ready && !error) return;
     S.lastReady = ready;
     send({
       type: 'ready',
       ready: ready,
       buffered: buffered || 0,
       duration: S.adapter && S.adapter.duration ? S.adapter.duration() : 0,
+      error: error || undefined,
     });
   }
 
@@ -528,6 +531,7 @@
       var cls = d < 0.12 ? 'g' : d < 0.5 ? 'w' : 'b';
       var stat;
       if (local && !c.hasFile) stat = '<span class="w">n’a pas encore ouvert son fichier</span>';
+      else if (c.error) stat = '<span class="b" title="' + esc(c.error) + '">lecture impossible</span>';
       else if (!c.ready) stat = '<span class="w">chargement…</span>';
       else stat = '<span class="' + cls + '">écart ' + (d * 1000).toFixed(0) + ' ms</span> · ping ' + Math.round(c.rtt || 0) + ' ms';
 
@@ -634,8 +638,22 @@
     var picking = !$('localPick').classList.contains('hidden');
     var waiting = !!S.state.media && S.state.pending && notReady.length > 0 && !picking;
     var starting = cor && cor.startsIn() > 120;
-    $('waitOverlay').classList.toggle('hidden', !(waiting || starting));
-    if (waiting) {
+    // Echecs de lecture : ceux qu'on attend en vain, ou moi-meme si mon
+    // lecteur a echoue (meme si la salle a fini par demarrer sans moi).
+    var iPilot = S.state.host === S.clientId;
+    var failed = waiting ? notReady.filter(function (c) { return c.error; }) : [];
+    if (!failed.length && S.state.media) {
+      S.state.clients.forEach(function (c) { if (c.id === S.clientId && c.error) failed = [c]; });
+    }
+    $('waitOverlay').classList.toggle('hidden', !(waiting || starting || failed.length));
+    $('waitOverlay').classList.toggle('failed', failed.length > 0);
+    $('waitAction').classList.toggle('hidden', !(failed.length > 0 && iPilot));
+    if (failed.length) {
+      // Attendre ne sert plus a rien : la video ne se chargera pas chez eux.
+      $('waitText').textContent =
+        'Lecture impossible chez ' + failed.map(function (c) { return c.id === S.clientId ? 'toi' : c.name; }).join(', ') +
+        ' : ' + failed[0].error + '.' + (iPilot ? '' : ' Le pilote peut choisir une autre source.');
+    } else if (waiting) {
       $('waitText').textContent = 'On attend ' + notReady.map(function (c) { return c.name; }).join(', ') + '…';
     } else if (starting) {
       $('waitText').textContent = 'Départ dans ' + (cor.startsIn() / 1000).toFixed(1) + ' s';
@@ -929,6 +947,7 @@
 
   $('btnLib').onclick = openLib;
   $('btnOpenLib').onclick = openLib;
+  $('waitAction').onclick = openLib;
   $('btnCloseLib').onclick = closeLib;
   $('btnRefreshLib').onclick = loadLibrary;
   $('library').onclick = function (e) { if (e.target === $('library')) closeLib(); };
@@ -1073,13 +1092,14 @@
     v.addEventListener('error', function () {
       if (!v.currentSrc) return;
       var media = S.state && S.state.media;
-      toast(
-        media && media.kind === 'local'
-          ? 'Ce fichier n’est pas lisible par le navigateur (essaie un .mp4 H.264).'
-          : 'Lecture impossible : format non supporté ou source injoignable.',
-        'warn'
-      );
-      reportReady(false, 0);
+      var code = v.error && v.error.code;
+      var why;
+      if (media && media.kind === 'local') why = 'fichier illisible par le navigateur (essaie un .mp4 H.264)';
+      else if (code === 2) why = 'source injoignable (lien mort ou hors ligne)';
+      else if (code === 3) why = 'fichier corrompu ou codec non supporté';
+      else why = 'lien mort ou format non supporté';
+      toast('Lecture impossible : ' + why + '.', 'warn', 7000);
+      reportReady(false, 0, why);
     });
 
     // Si le navigateur bloque la lecture automatique, on le detecte et on
