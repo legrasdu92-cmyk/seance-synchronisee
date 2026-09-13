@@ -183,8 +183,10 @@ const UA =
  *  rejettent une requete trop nue. Ceci ne resout aucun defi anti-robot
  *  (Cloudflare & co restent hors de portee d'un proxy serveur) : ca aide
  *  seulement les sites a protection legere a nous laisser passer. */
-function browserHeaders(u, referer) {
-  return {
+function browserHeaders(u, ctx) {
+  ctx = ctx || {};
+  const referer = ctx.referer;
+  const h = {
     'User-Agent': UA,
     Accept:
       'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
@@ -200,6 +202,61 @@ function browserHeaders(u, referer) {
     'Sec-Fetch-User': '?1',
     ...(referer ? { Referer: referer } : {}),
   };
+  // Requete Range du lecteur : relayee telle quelle pour un streaming fluide
+  // avec positionnement (seek) sur une video/audio proxifiee.
+  if (ctx.range) h['Range'] = ctx.range;
+  // Porte-cookies : on renvoie au site les cookies qu'il a poses, comme un vrai
+  // navigateur - ce qui debloque les sites a etapes (bannieres, redirections,
+  // sessions simples). Cloisonne par participant (voir cookieJar).
+  const cookies = ctx.jarKey ? getCookies(ctx.jarKey, u) : '';
+  if (cookies) h['Cookie'] = cookies;
+  return h;
+}
+
+// ------------------------------------------------------- porte-cookies ---
+// Un jar par participant (cle = who|host en cloud, "local|host" sinon) : sur le
+// serveur heberge, les cookies d'un utilisateur ne doivent JAMAIS fuiter vers un
+// autre. Volontairement simple : pas de path, expiration approximative.
+const cookieJars = new Map(); // jarKey -> Map(name -> {value, expires})
+function jarKeyFor(who, u) {
+  return (who || 'local') + '|' + u.hostname.replace(/^www\./, '');
+}
+function storeCookies(jarKey, u, setCookie) {
+  if (!setCookie) return;
+  const list = Array.isArray(setCookie) ? setCookie : [setCookie];
+  let jar = cookieJars.get(jarKey);
+  if (!jar) { jar = new Map(); cookieJars.set(jarKey, jar); }
+  for (const line of list) {
+    const first = String(line).split(';')[0];
+    const eq = first.indexOf('=');
+    if (eq < 0) continue;
+    const name = first.slice(0, eq).trim();
+    const value = first.slice(eq + 1).trim();
+    if (!name) continue;
+    const mExp = /expires=([^;]+)/i.exec(line);
+    let expires = 0;
+    if (mExp) { const t = Date.parse(mExp[1]); if (!Number.isNaN(t)) expires = t; }
+    const mMax = /max-age=(\d+)/i.exec(line);
+    if (mMax) expires = Date.now() + Number(mMax[1]) * 1000;
+    if (/expires=/i.test(line) && expires && expires < Date.now()) { jar.delete(name); continue; }
+    jar.set(name, { value, expires });
+  }
+  // Borne memoire : au-dela on oublie les plus vieux jars.
+  if (cookieJars.size > 5000) {
+    const k = cookieJars.keys().next().value;
+    cookieJars.delete(k);
+  }
+}
+function getCookies(jarKey, u) {
+  const jar = cookieJars.get(jarKey);
+  if (!jar) return '';
+  const now = Date.now();
+  const out = [];
+  for (const [name, c] of jar) {
+    if (c.expires && c.expires < now) { jar.delete(name); continue; }
+    out.push(name + '=' + c.value);
+  }
+  return out.join('; ');
 }
 
 const COLORS = ['#f97316', '#22d3ee', '#a78bfa', '#34d399', '#f472b6', '#facc15', '#60a5fa', '#fb7185'];
@@ -986,7 +1043,8 @@ function proxyAllowed(key) {
   return b.n <= PROXY_RATE.perMinute;
 }
 
-function fetchUpstream(rawUrl, depth, cb, referer) {
+function fetchUpstream(rawUrl, depth, cb, ctx) {
+  ctx = ctx || {};
   if (depth > 6) return cb(new Error('trop de redirections'));
   let u;
   try {
@@ -998,7 +1056,7 @@ function fetchUpstream(rawUrl, depth, cb, referer) {
 
   checkHost(u, (herr) => {
     if (herr) return cb(herr);
-    fetchChecked(u, depth, cb, referer);
+    fetchChecked(u, depth, cb, ctx);
   });
 }
 
@@ -1031,16 +1089,18 @@ function sendMaybeGzip(req, res, code, headers, body) {
   res.end(body);
 }
 
-function fetchChecked(u, depth, cb, referer) {
+function fetchChecked(u, depth, cb, ctx) {
   const lib = u.protocol === 'https:' ? https : http;
   const r = lib.request(
     u,
     {
       method: 'GET',
-      headers: browserHeaders(u, referer),
+      headers: browserHeaders(u, ctx),
       agent: u.protocol === 'https:' ? keepAliveHttps : keepAliveHttp,
     },
     (up) => {
+      // On memorise les cookies poses par le site (comme un vrai navigateur).
+      if (ctx.jarKey) storeCookies(ctx.jarKey, u, up.headers['set-cookie']);
       const code = up.statusCode || 0;
       if ([301, 302, 303, 307, 308].includes(code) && up.headers.location) {
         up.resume();
@@ -1050,8 +1110,9 @@ function fetchChecked(u, depth, cb, referer) {
         } catch (_) {
           return cb(new Error('redirection invalide'));
         }
-        // Le referer devient l'origine d'ou l'on vient : plus credible.
-        return fetchUpstream(next, depth + 1, cb, u.origin + '/');
+        // Le referer devient l'origine d'ou l'on vient ; on garde le jar mais
+        // pas la Range (elle ne vaut que pour la ressource initiale).
+        return fetchUpstream(next, depth + 1, cb, { referer: u.origin + '/', jarKey: ctx.jarKey });
       }
       cb(null, { up, finalUrl: u.href });
     }
@@ -1153,9 +1214,14 @@ function proxyBlockedPage(res, finalUrl, reason) {
       '<h1>Ce site refuse la navigation partagée</h1>' +
       '<p class="sub">' + escapeAttr(reason) + '</p>' +
       '<a class="btn" href="' + safe + '" target="_blank" rel="noopener noreferrer">Ouvrir dans mon onglet ↗</a>' +
-      '<p class="tip">Ouvrez-le chacun de votre côté : la séance reste votre horloge commune et votre chat.</p>' +
+      '<div><button id="all" style="margin:0 0 16px;padding:9px 18px;border-radius:10px;border:1px solid rgba(249,115,22,.5);' +
+      'background:transparent;color:#f8b26a;font-weight:600;cursor:pointer">Ouvrir chez tout le monde</button></div>' +
+      '<p class="tip">Chacun l’ouvre de son côté : la séance reste votre horloge commune et votre chat.</p>' +
       '<p><code>' + safe + '</code></p>' +
-      '</div>',
+      '</div>' +
+      '<script>document.getElementById("all").onclick=function(){' +
+      'try{parent.postMessage({__cbaction:"openAll",url:' + JSON.stringify(finalUrl) + '},"*");}catch(e){}' +
+      'this.textContent="Proposé ✓";this.disabled=true;};<\/script>',
     'utf8'
   );
   // 200 : c'est une page valide dans l'iframe, pas une erreur du proxy.
@@ -1193,13 +1259,23 @@ function handleProxy(req, res, url, appOrigin) {
   const target = normalizeUrl(url.searchParams.get('url'));
   if (!target) return proxyErrorPage(res, 'URL invalide.', url.searchParams.get('url'));
 
-  fetchUpstream(target, 0, (err, out) => {
+  // Contexte de la requete sortante : Range (streaming/seek) et porte-cookies
+  // cloisonne par participant (le 'who' en cloud, sinon un jar local unique).
+  let tu; try { tu = new URL(target); } catch (_) {}
+  const ctx = {
+    range: req.headers.range || null,
+    jarKey: tu ? jarKeyFor(url.searchParams.get('who'), tu) : null,
+  };
+
+  fetchUpstream(target, 0, onUpstream, ctx);
+  function onUpstream(err, out) {
     if (err) return proxyErrorPage(res, 'Echec du chargement : ' + err.message, target);
     const { up, finalUrl } = out;
     const ct = String(up.headers['content-type'] || '');
     const isHtml = /text\/html|application\/xhtml/i.test(ct) || !ct;
 
     // Blocage detectable avant meme de lire le corps (ex. Cloudflare challenge).
+    // (Range/cookies transmis via ctx ci-dessus.)
     const earlyBlock = detectBlock(up, null);
     if (earlyBlock && !isHtml) {
       up.resume();
@@ -1246,7 +1322,7 @@ function handleProxy(req, res, url, appOrigin) {
       // vite qu'en clair (une page peut passer de 1 Mo a ~150 Ko).
       sendMaybeGzip(req, res, up.statusCode || 200, headers, body);
     });
-  });
+  }
 }
 
 // ------------------------------------------------------------------ static ---

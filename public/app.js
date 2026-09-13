@@ -743,6 +743,13 @@
 
   window.addEventListener('message', function (e) {
     var d = e.data;
+    // Depuis l'ecran de blocage (dans l'iframe) : proposer le site a tous.
+    if (d && d.__cbaction === 'openAll' && d.url) {
+      window.open(d.url, '_blank', 'noopener');
+      send({ type: 'openTab', url: d.url });
+      toast('Proposé à tout le monde : chacun a un bouton pour l\'ouvrir.');
+      return;
+    }
     if (!d || d.__cb !== 1) return;
     if (d.type === 'navigate') send({ type: 'navigate', url: d.url });
     else if (d.type === 'scroll') send({ type: 'scroll', x: d.x, y: d.y });
