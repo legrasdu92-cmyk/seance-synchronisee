@@ -395,3 +395,7 @@ button.wide { width: 100%; }
   flex: none; background: transparent; border: 0; color: #8b96ad;
   font-size: 18px; line-height: 1; cursor: pointer; padding: 0 4px;
 }
+
+/* Barre de progression (envoi du film de l'hote) */
+.progress { height: 8px; border-radius: 6px; background: rgba(255,255,255,.1); overflow: hidden; }
+.progress-fill { height: 100%; width: 0; background: #f97316; transition: width .2s ease; }

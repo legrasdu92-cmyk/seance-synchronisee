@@ -238,6 +238,20 @@
     </div>
 
     <div class="lib-pane hidden" id="libLocal">
+      <div id="hostUploadBlock" class="hidden" style="margin-bottom:18px">
+        <p class="muted small">Toi seul as le film ? Diffuse-le depuis ton appareil : les autres n'ont
+          rien à fournir, ils le regardent directement. Le fichier est envoyé une fois puis servi à tout
+          le monde.</p>
+        <label class="filebtn primary">Diffuser mon fichier…<input type="file" id="hostInput" accept="video/*,audio/*"></label>
+        <div id="hostProgress" class="hidden" style="margin-top:12px">
+          <div class="progress"><div id="hostProgressFill" class="progress-fill"></div></div>
+          <p class="muted small" id="hostProgressText" style="margin-top:6px">Envoi…</p>
+        </div>
+        <p class="muted small" id="hostHint" style="margin-top:10px">Idéal si tu es le seul à avoir le
+          fichier. Limite de taille indiquée à l'envoi.</p>
+        <hr style="border:0;border-top:1px solid rgba(255,255,255,.08);margin:18px 0 14px">
+        <p class="muted small" style="font-weight:600;color:#c7d0e0">Ou : chacun a déjà sa copie</p>
+      </div>
       <p class="muted small">Vous avez déjà chacun le film sur votre disque ? Ce mode ne fait circuler que
         l'horloge : aucune vidéo ne transite par le réseau. C'est la bonne option quand vous n'êtes pas sur
         le même réseau, ou quand le fichier est trop lourd à diffuser.</p>

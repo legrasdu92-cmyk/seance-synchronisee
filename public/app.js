@@ -221,6 +221,7 @@
   function srcFor(media) {
     if (media.kind === 'file') return '/media/file?p=' + encodeURIComponent(media.src);
     if (media.kind === 'local') return S.localFile ? S.localFile.url : null;
+    if (media.kind === 'hosted') return '/host-file?room=' + encodeURIComponent(S.room) + '&v=' + encodeURIComponent(media.src);
     return media.src;
   }
 
@@ -235,6 +236,7 @@
   function metaFor(media) {
     if (media.kind === 'file') return 'fichier partagé par l’hôte';
     if (media.kind === 'local') return 'chacun sa copie · ' + bytes(media.size);
+    if (media.kind === 'hosted') return 'diffusé par l\'hôte · ' + bytes(media.size);
     if (media.kind === 'youtube') return 'YouTube';
     return 'lien direct';
   }
@@ -1037,6 +1039,50 @@
     if (f) useLocalFile(f);
   };
 
+  // Diffuser le film depuis l'appareil de l'hote : un seul envoi, puis le
+  // serveur le sert a tout le monde (les autres n'ont rien a fournir).
+  if ($('hostInput')) $('hostInput').onchange = function () {
+    var f = this.files && this.files[0];
+    this.value = '';
+    if (f) uploadHostFile(f);
+  };
+
+  function uploadHostFile(file) {
+    var maxMb = (S.cfg && S.cfg.hostUploadMaxMb) || 800;
+    if (file.size > maxMb * 1024 * 1024) {
+      toast('Fichier trop lourd pour la diffusion (max ' + maxMb + ' Mo). Utilise « chacun sa copie ».', 'warn', 6000);
+      return;
+    }
+    $('hostProgress').classList.remove('hidden');
+    $('hostProgressFill').style.width = '0%';
+    $('hostProgressText').textContent = 'Envoi… 0 %';
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/host-upload?room=' + encodeURIComponent(S.room) +
+      '&who=' + encodeURIComponent(S.clientId) + '&size=' + file.size +
+      '&name=' + encodeURIComponent(file.name));
+    xhr.upload.onprogress = function (e) {
+      if (!e.lengthComputable) return;
+      var pct = Math.round((e.loaded / e.total) * 100);
+      $('hostProgressFill').style.width = pct + '%';
+      $('hostProgressText').textContent = 'Envoi… ' + pct + ' %';
+    };
+    xhr.onload = function () {
+      if (xhr.status === 200) {
+        $('hostProgressText').textContent = 'Envoyé — lecture pour tout le monde.';
+        // Nouvelle version a chaque envoi : force le rechargement de la source.
+        send({ type: 'media', media: { kind: 'hosted', src: String(Date.now()), title: file.name, size: file.size } });
+        setTimeout(function () { closeLib(); $('hostProgress').classList.add('hidden'); }, 800);
+      } else {
+        var msg = 'Envoi impossible.';
+        try { var d = JSON.parse(xhr.responseText); if (d.maxMb) msg = 'Fichier trop lourd (max ' + d.maxMb + ' Mo).'; } catch (e) {}
+        $('hostProgress').classList.add('hidden');
+        toast(msg, 'warn', 6000);
+      }
+    };
+    xhr.onerror = function () { $('hostProgress').classList.add('hidden'); toast('Envoi interrompu.', 'warn'); };
+    xhr.send(file);
+  }
+
   // glisser-deposer un fichier video n'importe ou dans la fenetre
   (function () {
     var depth = 0;
@@ -1171,6 +1217,11 @@
       document.querySelector('.lib-tab[data-lib="local"]').classList.add('active');
       $('libLocal').classList.remove('hidden');
       $('btnInvite').title = 'Copier le lien et le code de la séance';
+      if (cfg.canHostUpload && $('hostUploadBlock')) {
+        $('hostUploadBlock').classList.remove('hidden');
+        if ($('hostHint')) $('hostHint').textContent =
+          'Idéal si tu es le seul à avoir le fichier (max ' + (cfg.hostUploadMaxMb || 800) + ' Mo).';
+      }
 
       $('roomLabel').firstChild.textContent = 'Code de séance ';
       $('joinRoom').placeholder = 'ex. k3f9tp';

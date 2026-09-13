@@ -60,6 +60,39 @@ const CLOUD = !!(process.env.CLOUD || process.env.RENDER);
 const WEB_PROXY = !CLOUD || /^(1|true|yes|on)$/i.test(String(process.env.WEB_PROXY || ''));
 const dns = require('dns');
 
+/**
+ * Diffusion du film depuis l'appareil de l'hote (HOST_UPLOAD, actif par
+ * defaut). L'hote televerse une fois son fichier ; le serveur le garde dans un
+ * dossier temporaire par salle et le diffuse a tout le monde avec support des
+ * requetes Range (positionnement instantane). Les autres n'ont rien a
+ * telecharger d'avance. Plafonne pour ne pas saturer le disque/le debit d'un
+ * hebergement gratuit. */
+const HOST_UPLOAD = !/^(0|false|no|off)$/i.test(String(process.env.HOST_UPLOAD || '1'));
+const HOST_UPLOAD_MAX = Number(process.env.HOST_UPLOAD_MAX_MB || 800) * 1024 * 1024;
+const UPLOAD_DIR = path.join(os.tmpdir(), 'seance-uploads');
+try { fs.mkdirSync(UPLOAD_DIR, { recursive: true }); } catch (_) {}
+
+/** Chemin du film televerse pour une salle (un seul a la fois). */
+function hostFilePath(roomId) {
+  return path.join(UPLOAD_DIR, roomId.replace(/[^a-z0-9_-]/gi, '') + '.upload');
+}
+/** Type MIME du film televerse, deduit de l'extension du nom d'origine et
+ *  garde a cote du fichier (le fichier temporaire, lui, n'a pas d'extension). */
+function hostTypePath(roomId) {
+  return hostFilePath(roomId) + '.type';
+}
+function hostFileType(roomId) {
+  try {
+    const t = fs.readFileSync(hostTypePath(roomId), 'utf8').trim();
+    if (t) return t;
+  } catch (_) {}
+  return 'video/mp4';
+}
+function clearHostFile(roomId) {
+  try { fs.unlinkSync(hostFilePath(roomId)); } catch (_) {}
+  try { fs.unlinkSync(hostTypePath(roomId)); } catch (_) {}
+}
+
 // ------------------------------------------------------------ cle d'acces ---
 // Le serveur diffuse des fichiers du disque et sait aller chercher n'importe
 // quelle page web. Expose sur Internet sans controle, il deviendrait un relais
@@ -399,7 +432,11 @@ function handleEvent(room, client, msg) {
     }
     case 'media': {
       const m = msg.media || {};
-      if (!m.src || !['file', 'url', 'youtube', 'local'].includes(m.kind)) break;
+      if (!m.src || !['file', 'url', 'youtube', 'local', 'hosted'].includes(m.kind)) break;
+      // 'hosted' : diffuse par l'hote, seulement si le fichier a bien ete recu.
+      if (m.kind === 'hosted') {
+        try { if (!fs.statSync(hostFilePath(room.id)).isFile()) break; } catch (_) { break; }
+      }
       const next = {
         kind: m.kind,
         src: String(m.src).slice(0, 2000),
@@ -748,6 +785,13 @@ function safeMediaPath(rel) {
 function serveMediaFile(req, res, rel) {
   const file = safeMediaPath(rel);
   if (!file) return json(res, 400, { error: 'chemin invalide' });
+  return serveFileRange(req, res, file);
+}
+
+/** Sert n'importe quel fichier avec support des requetes Range (necessaire
+ *  pour que la video se positionne sans tout retelecharger). Reutilise pour
+ *  la mediatheque locale et pour le film televerse par l'hote. */
+function serveFileRange(req, res, file, typeOverride) {
   let stat;
   try {
     stat = fs.statSync(file);
@@ -756,7 +800,7 @@ function serveMediaFile(req, res, rel) {
   }
   if (!stat.isFile()) return json(res, 404, { error: 'fichier introuvable' });
 
-  const type = MIME[path.extname(file).toLowerCase()] || 'application/octet-stream';
+  const type = typeOverride || MIME[path.extname(file).toLowerCase()] || 'application/octet-stream';
   const range = req.headers.range;
   const headers = {
     'Content-Type': type,
@@ -1316,7 +1360,10 @@ const server = http.createServer((req, res) => {
         // En cloud, une seance vide survit plus longtemps : le code doit
         // rester valable si tout le monde se deconnecte un moment.
         setTimeout(() => {
-          if (rooms.get(roomId) && rooms.get(roomId).clients.size === 0) rooms.delete(roomId);
+          if (rooms.get(roomId) && rooms.get(roomId).clients.size === 0) {
+            rooms.delete(roomId);
+            clearHostFile(roomId); // le film televerse part avec la salle
+          }
         }, (CLOUD ? 180 : 10) * 60 * 1000);
         return;
       }
@@ -1356,7 +1403,58 @@ const server = http.createServer((req, res) => {
       cloud: CLOUD,
       canProxy: WEB_PROXY,
       canHostFiles: !CLOUD,
+      // Diffusion du film depuis l'appareil de l'hote (les autres n'ont rien
+      // a fournir). En local c'est inutile (la mediatheque le fait deja).
+      canHostUpload: CLOUD && HOST_UPLOAD,
+      hostUploadMaxMb: Math.round(HOST_UPLOAD_MAX / 1024 / 1024),
     });
+  }
+
+  // L'hote televerse son film : stocke dans un fichier temporaire de la salle,
+  // puis diffuse a tous via /host-file avec support des Range.
+  if (p === '/host-upload' && req.method === 'POST') {
+    if (!(CLOUD && HOST_UPLOAD)) return json(res, 403, { error: 'diffusion desactivee' });
+    const roomId = sanitizeRoom(url.searchParams.get('room'));
+    const who = String(url.searchParams.get('who') || '');
+    const room = rooms.get(roomId);
+    if (!room || !who || !room.clients.has(who)) return json(res, 403, { error: 'hors seance' });
+    const declared = Number(url.searchParams.get('size') || 0);
+    if (declared && declared > HOST_UPLOAD_MAX) {
+      return json(res, 413, { error: 'fichier trop volumineux', maxMb: Math.round(HOST_UPLOAD_MAX / 1024 / 1024) });
+    }
+    const dest = hostFilePath(roomId);
+    const tmp = dest + '.part';
+    const out = fs.createWriteStream(tmp);
+    let received = 0;
+    let aborted = false;
+    req.on('data', (c) => {
+      received += c.length;
+      if (received > HOST_UPLOAD_MAX && !aborted) {
+        aborted = true;
+        out.destroy();
+        try { fs.unlinkSync(tmp); } catch (_) {}
+        req.destroy();
+        json(res, 413, { error: 'fichier trop volumineux', maxMb: Math.round(HOST_UPLOAD_MAX / 1024 / 1024) });
+      }
+    });
+    req.pipe(out);
+    out.on('error', () => { if (!aborted) json(res, 500, { error: 'ecriture impossible' }); });
+    out.on('finish', () => {
+      if (aborted) return;
+      try { fs.renameSync(tmp, dest); } catch (_) { return json(res, 500, { error: 'finalisation impossible' }); }
+      // Type MIME deduit du nom d'origine, pour que le lecteur accepte la video.
+      const ext = path.extname(String(url.searchParams.get('name') || '')).toLowerCase();
+      const type = MIME[ext] || 'video/mp4';
+      try { fs.writeFileSync(hostTypePath(roomId), type); } catch (_) {}
+      json(res, 200, { ok: true, size: received });
+    });
+    return;
+  }
+
+  // Diffusion du film televerse par l'hote de la salle.
+  if (p === '/host-file') {
+    const roomId = sanitizeRoom(url.searchParams.get('room'));
+    return serveFileRange(req, res, hostFilePath(roomId), hostFileType(roomId));
   }
 
   // Cree une seance avec un code non devinable (mode cloud).
