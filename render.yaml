@@ -13,5 +13,10 @@ services:
       # relais ouvert sur Internet). Chacun lit sa propre copie du film.
       - key: CLOUD
         value: "1"
+      # Navigation partagee sur le serveur heberge : reservee aux participants
+      # d'une seance, adresses internes refusees, debit limite par salle.
+      # Mettre "0" pour la couper.
+      - key: WEB_PROXY
+        value: "1"
       - key: NODE_VERSION
         value: "22"

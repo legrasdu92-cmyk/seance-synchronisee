@@ -44,11 +44,21 @@ const MEDIA_DIR = path.resolve(arg('media', process.env.MEDIA_DIR || path.join(_
  *    reste allumee, et une cle d'acces protege le tout.
  *
  *  - en cloud (CLOUD=1) : le serveur ne garde que l'horloge, les salles et le
- *    chat. Aucun disque a servir, aucun proxy web - ce serait un relais ouvert
- *    sur Internet. Chacun lit sa propre copie du film, et le code de seance
- *    tient lieu de secret. Personne n'a besoin d'etre "l'hote".
+ *    chat. Aucun disque a servir. Chacun lit sa propre copie du film, et le
+ *    code de seance tient lieu de secret. Personne n'a besoin d'etre
+ *    "l'hote". La navigation partagee est en option (WEB_PROXY=1, voir plus
+ *    bas) : reservee aux participants d'une seance, jamais un relais ouvert.
  */
 const CLOUD = !!(process.env.CLOUD || process.env.RENDER);
+
+/**
+ * Navigation partagee (proxy) sur le serveur heberge : WEB_PROXY=1.
+ * Sans garde-fou ce serait un relais anonyme ; ici il n'est accessible qu'aux
+ * participants d'une seance en cours (code + identifiant de client), il
+ * refuse les adresses internes et il est limite en debit par salle.
+ */
+const WEB_PROXY = !CLOUD || /^(1|true|yes|on)$/i.test(String(process.env.WEB_PROXY || ''));
+const dns = require('dns');
 
 // ------------------------------------------------------------ cle d'acces ---
 // Le serveur diffuse des fichiers du disque et sait aller chercher n'importe
@@ -806,6 +816,52 @@ function serveSubtitle(res, rel) {
 
 // ------------------------------------------------------------------- proxy ---
 
+/** Une adresse IP qui ne doit jamais etre atteinte depuis un serveur public :
+ *  boucle locale, reseaux prives, lien local (dont les metadonnees cloud). */
+function isPrivateIp(ip) {
+  if (!ip) return true;
+  if (ip.startsWith('::ffff:')) ip = ip.slice(7);
+  if (ip.includes(':')) {
+    const low = ip.toLowerCase();
+    return low === '::1' || low === '::' || /^f[cd]/.test(low) || /^fe[89ab]/.test(low);
+  }
+  const p = ip.split('.').map(Number);
+  if (p.length !== 4 || p.some((x) => !(x >= 0 && x <= 255))) return true;
+  return (
+    p[0] === 0 || p[0] === 10 || p[0] === 127 ||
+    (p[0] === 100 && p[1] >= 64 && p[1] <= 127) ||
+    (p[0] === 169 && p[1] === 254) ||
+    (p[0] === 172 && p[1] >= 16 && p[1] <= 31) ||
+    (p[0] === 192 && p[1] === 168) ||
+    p[0] >= 224
+  );
+}
+
+/** En cloud, on verifie ou pointe un nom avant d'y aller ; en local, tout est
+ *  permis (c'est le reseau de l'utilisateur). */
+function checkHost(u, cb) {
+  if (!CLOUD) return cb(null);
+  const host = u.hostname.replace(/^[|]$/g, '');
+  if (/^(localhost|.*.local|.*.internal|.*.localhost)$/i.test(host)) return cb(new Error('adresse interne refusee'));
+  dns.lookup(host, { all: true }, (err, addrs) => {
+    if (err) return cb(new Error('hote introuvable'));
+    for (const a of addrs) if (isPrivateIp(a.address)) return cb(new Error('adresse interne refusee'));
+    cb(null);
+  });
+}
+
+/** Debit par salle : quelques dizaines de pages par minute suffisent
+ *  largement a une soiree, et bornent ce qu'un abus pourrait relayer. */
+const PROXY_RATE = { perMinute: 40, buckets: new Map() };
+function proxyAllowed(key) {
+  const now = Date.now();
+  const b = PROXY_RATE.buckets.get(key) || { t: now, n: 0 };
+  if (now - b.t > 60000) { b.t = now; b.n = 0; }
+  b.n++;
+  PROXY_RATE.buckets.set(key, b);
+  return b.n <= PROXY_RATE.perMinute;
+}
+
 function fetchUpstream(rawUrl, depth, cb) {
   if (depth > 6) return cb(new Error('trop de redirections'));
   let u;
@@ -816,6 +872,13 @@ function fetchUpstream(rawUrl, depth, cb) {
   }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return cb(new Error('protocole non supporte'));
 
+  checkHost(u, (herr) => {
+    if (herr) return cb(herr);
+    fetchChecked(u, depth, cb);
+  });
+}
+
+function fetchChecked(u, depth, cb) {
   const lib = u.protocol === 'https:' ? https : http;
   const r = lib.request(
     u,
@@ -848,6 +911,8 @@ function fetchUpstream(rawUrl, depth, cb) {
   r.end();
 }
 
+const PROXY_MAX_HTML = 6 * 1024 * 1024;
+
 function decodeBody(up, cb) {
   const enc = String(up.headers['content-encoding'] || '').toLowerCase();
   let stream = up;
@@ -855,7 +920,15 @@ function decodeBody(up, cb) {
   else if (enc === 'deflate') stream = up.pipe(zlib.createInflate());
   else if (enc === 'br') stream = up.pipe(zlib.createBrotliDecompress());
   const chunks = [];
-  stream.on('data', (c) => chunks.push(c));
+  let size = 0;
+  stream.on('data', (c) => {
+    size += c.length;
+    if (size > PROXY_MAX_HTML) {
+      up.destroy();
+      return cb(new Error('page trop volumineuse'));
+    }
+    chunks.push(c);
+  });
   stream.on('end', () => cb(null, Buffer.concat(chunks)));
   stream.on('error', (e) => cb(e));
 }
@@ -997,7 +1070,8 @@ function serveStatic(res, urlPath) {
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://' + (req.headers.host || 'localhost:' + PORT));
   const p = url.pathname;
-  const appOrigin = 'http://' + (req.headers.host || 'localhost:' + PORT);
+  const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() || 'http';
+  const appOrigin = proto + '://' + (req.headers.host || 'localhost:' + PORT);
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
@@ -1152,7 +1226,7 @@ const server = http.createServer((req, res) => {
   if (p === '/config') {
     return json(res, 200, {
       cloud: CLOUD,
-      canProxy: !CLOUD,
+      canProxy: WEB_PROXY,
       canHostFiles: !CLOUD,
     });
   }
@@ -1198,10 +1272,21 @@ const server = http.createServer((req, res) => {
     return serveSubtitle(res, url.searchParams.get('p'));
   }
 
-  // Le proxy reste strictement local : sur un hebergement public, il ferait de
-  // ce service un relais anonyme utilisable par n'importe qui.
+  // En local le proxy est libre (cle d'acces deja verifiee). Sur le serveur
+  // heberge, il faut etre dans une seance en cours : sans cela, ce serait un
+  // relais anonyme utilisable par n'importe qui.
   if (p === '/proxy') {
-    if (CLOUD) return proxyErrorPage(res, 'La navigation partagée est désactivée sur le serveur hébergé.', '');
+    if (!WEB_PROXY) return proxyErrorPage(res, 'La navigation partagée est désactivée sur ce serveur.', '');
+    if (CLOUD) {
+      const room = rooms.get(sanitizeRoom(url.searchParams.get('room')));
+      const who = String(url.searchParams.get('who') || '');
+      if (!room || !who || !room.clients.has(who)) {
+        return proxyErrorPage(res, 'Il faut être dans une séance pour naviguer.', '');
+      }
+      if (!proxyAllowed(room.id)) {
+        return proxyErrorPage(res, 'Trop de pages en une minute pour cette séance, réessaie dans un instant.', '');
+      }
+    }
     return handleProxy(req, res, url, appOrigin);
   }
 

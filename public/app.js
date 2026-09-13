@@ -195,7 +195,7 @@
     if (frameKey !== S.frameKey) {
       S.frameKey = frameKey;
       $('webEmpty').classList.toggle('hidden', !!w.url);
-      if (w.url) $('frame').src = proxyOrigin() + '/proxy?url=' + encodeURIComponent(w.url) + '&n=' + w.nonce;
+      if (w.url) $('frame').src = proxyOrigin() + '/proxy?url=' + encodeURIComponent(w.url) + '&n=' + w.nonce + proxyAuth();
     }
 
     renderPeople();
@@ -705,6 +705,13 @@
 
   // ------------------------------------------------------- mode web ------
 
+  /** Sur le serveur heberge, le proxy n'accepte que les participants d'une
+   *  seance en cours : on lui donne le code et notre identifiant. */
+  function proxyAuth() {
+    if (!(S.cfg && S.cfg.cloud)) return '';
+    return '&room=' + encodeURIComponent(S.room || '') + '&who=' + encodeURIComponent(S.clientId || '');
+  }
+
   function proxyOrigin() {
     var h = location.hostname;
     if (h === 'localhost') return location.protocol + '//127.0.0.1:' + location.port;
@@ -1117,10 +1124,15 @@
   /** Adapte l'interface a ce que cette instance sait faire. */
   function applyConfig(cfg) {
     S.cfg = cfg;
+    if (!cfg.canProxy) document.querySelector('.tab[data-mode="web"]').classList.add('hidden');
     if (cfg.cloud) {
-      // Pas de disque a servir ni de proxy : on retire ce qui ne marcherait pas.
-      document.querySelector('.tab[data-mode="web"]').classList.add('hidden');
+      // Pas de disque a servir : on retire ce qui ne marcherait pas.
       document.querySelector('.lib-tab[data-lib="files"]').classList.add('hidden');
+      // Ici les pages proxifiees sortent de la meme origine que l'appli. Le
+      // bac a sable sans allow-same-origin leur donne une origine opaque :
+      // elles ne peuvent ni lire son stockage ni parler a son API en notre
+      // nom. postMessage vers le parent continue de fonctionner.
+      $('frame').setAttribute('sandbox', 'allow-scripts allow-forms allow-popups allow-pointer-lock');
       $('libFiles').classList.add('hidden');
       document.querySelector('.lib-tab[data-lib="local"]').classList.add('active');
       $('libLocal').classList.remove('hidden');
