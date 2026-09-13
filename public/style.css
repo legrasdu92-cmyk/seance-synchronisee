@@ -377,3 +377,21 @@ button.wide { width: 100%; }
   .vol, .nowplaying span, #btnFull { display: none; }
   .controls { flex-wrap: wrap; }
 }
+
+/* Banniere "un site a ouvrir dans ton propre navigateur" (sites non proxifiables) */
+.open-banner {
+  position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 80;
+  display: flex; align-items: center; gap: 12px; max-width: 90vw;
+  padding: 10px 12px 10px 16px; border-radius: 12px;
+  background: #131a26; border: 1px solid rgba(249,115,22,.5);
+  box-shadow: 0 10px 30px rgba(0,0,0,.45); font-size: 13px; color: #e6ebf5;
+}
+.open-banner span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60vw; }
+.open-banner a {
+  flex: none; padding: 7px 14px; border-radius: 8px; background: #f97316;
+  color: #0b0f17; font-weight: 600; text-decoration: none;
+}
+.open-banner button {
+  flex: none; background: transparent; border: 0; color: #8b96ad;
+  font-size: 18px; line-height: 1; cursor: pointer; padding: 0 4px;
+}

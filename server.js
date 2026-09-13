@@ -519,6 +519,20 @@ function handleEvent(room, client, msg) {
       pushState(room);
       break;
     }
+    case 'openTab': {
+      // Ouvrir chez tout le monde : pour les sites qu'un proxy ne peut pas
+      // servir (anti-robot, connexion...). Chaque participant ouvre le site
+      // dans son propre navigateur ; la seance reste horloge et chat.
+      if (!canDrive(room, client)) {
+        sse(client.res, 'toast', { text: 'Seul le pilote peut proposer un site.', tone: 'warn' });
+        break;
+      }
+      const u = normalizeUrl(msg.url);
+      if (!u) break;
+      broadcast(room, 'openTab', { url: u, by: client.name }, client.id);
+      system(room, client.name + ' propose d\'ouvrir ' + u + ' dans ton navigateur.');
+      break;
+    }
     case 'host': {
       // Sans cible : on prend la main. Avec cible : on la donne.
       const target = msg.target && room.clients.get(msg.target);
@@ -901,11 +915,44 @@ function fetchUpstream(rawUrl, depth, cb, referer) {
   });
 }
 
+// Connexions reutilisees : eviter de refaire la poignee de main TLS a chaque
+// page accelere nettement la navigation vers un meme site.
+const keepAliveHttps = new https.Agent({ keepAlive: true, maxSockets: 24 });
+const keepAliveHttp = new http.Agent({ keepAlive: true, maxSockets: 24 });
+
+/** Renvoie un corps en gzip si le client l'accepte (la plupart le font),
+ *  sinon tel quel. Gros gain sur les pages HTML volumineuses. */
+function sendMaybeGzip(req, res, code, headers, body) {
+  const accepts = /\bgzip\b/.test(String(req.headers['accept-encoding'] || ''));
+  if (accepts && body.length > 512) {
+    zlib.gzip(body, (err, gz) => {
+      if (err) {
+        headers['Content-Length'] = body.length;
+        res.writeHead(code, headers);
+        return res.end(body);
+      }
+      headers['Content-Encoding'] = 'gzip';
+      headers['Vary'] = 'Accept-Encoding';
+      headers['Content-Length'] = gz.length;
+      res.writeHead(code, headers);
+      res.end(gz);
+    });
+    return;
+  }
+  headers['Content-Length'] = body.length;
+  res.writeHead(code, headers);
+  res.end(body);
+}
+
 function fetchChecked(u, depth, cb, referer) {
   const lib = u.protocol === 'https:' ? https : http;
   const r = lib.request(
     u,
-    { method: 'GET', headers: browserHeaders(u, referer) },
+    {
+      method: 'GET',
+      headers: browserHeaders(u, referer),
+      agent: u.protocol === 'https:' ? keepAliveHttps : keepAliveHttp,
+    },
     (up) => {
       const code = up.statusCode || 0;
       if ([301, 302, 303, 307, 308].includes(code) && up.headers.location) {
@@ -1108,9 +1155,9 @@ function handleProxy(req, res, url, appOrigin) {
       }
       const body = Buffer.from(rewriteHtml(text, finalUrl, appOrigin), 'utf8');
       headers['Content-Type'] = 'text/html; charset=utf-8';
-      headers['Content-Length'] = body.length;
-      res.writeHead(up.statusCode || 200, headers);
-      res.end(body);
+      // On renvoie la page recompressee : elle traverse le reseau bien plus
+      // vite qu'en clair (une page peut passer de 1 Mo a ~150 Ko).
+      sendMaybeGzip(req, res, up.statusCode || 200, headers, body);
     });
   });
 }

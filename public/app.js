@@ -125,6 +125,10 @@
       toast(d.text, d.tone);
     });
     es.addEventListener('reaction', function (e) { popReaction(JSON.parse(e.data)); });
+    es.addEventListener('openTab', function (e) {
+      var d = JSON.parse(e.data);
+      if (window.__onOpenTab) window.__onOpenTab(d.url, d.by);
+    });
     es.addEventListener('cursor', function (e) {
       var d = JSON.parse(e.data);
       S.cursors[d.id] = { x: d.x, y: d.y, name: d.name, color: d.color, ts: Date.now() };
@@ -907,6 +911,36 @@
   $('btnWebBack').onclick = function () { send({ type: 'back' }); };
   $('btnWebFwd').onclick = function () { send({ type: 'forward' }); };
   $('btnWebReload').onclick = function () { send({ type: 'reload' }); };
+
+  // Ouvrir chez tout le monde : pour les sites qu'un proxy ne peut pas servir
+  // (anti-robot, connexion). Chacun ouvre le site dans son vrai navigateur.
+  $('btnOpenAll').onclick = function () {
+    var u = (S.state && S.state.web && S.state.web.url) || $('urlInput').value;
+    u = (u || '').trim();
+    if (!u) { toast('Ouvre d\'abord un site, puis propose-le à tous.', 'warn'); return; }
+    // Le clic du pilote sert d'autorisation : sa fenetre s'ouvre tout de suite.
+    window.open(u, '_blank', 'noopener');
+    send({ type: 'openTab', url: u });
+    toast('Proposé à tout le monde : chacun a un bouton pour l\'ouvrir.');
+  };
+
+  (function () {
+    var timer = null;
+    function hide() { $('openBanner').classList.add('hidden'); }
+    $('openBannerClose').onclick = hide;
+    $('openBannerBtn').onclick = function () { setTimeout(hide, 100); };
+    // Chaque participant recoit la proposition : un clic (= geste utilisateur,
+    // requis par le navigateur) ouvre le site dans son propre onglet.
+    window.__onOpenTab = function (url, by) {
+      var host = url;
+      try { host = new URL(url).host; } catch (e) {}
+      $('openBannerText').textContent = (by ? by + ' propose : ' : 'À ouvrir : ') + host;
+      $('openBannerBtn').href = url;
+      $('openBanner').classList.remove('hidden');
+      clearTimeout(timer);
+      timer = setTimeout(hide, 30000);
+    };
+  })();
   $('freeBrowse').onchange = function () { send({ type: 'freeBrowsing', on: this.checked }); };
   Array.prototype.forEach.call(document.querySelectorAll('.quick button'), function (b) {
     b.onclick = function () { send({ type: 'navigate', url: b.dataset.url }); };

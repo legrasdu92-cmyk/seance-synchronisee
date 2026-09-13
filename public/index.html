@@ -145,6 +145,7 @@
           <button class="round small" id="btnWebFwd" title="Suivant">→</button>
           <button class="round small" id="btnWebReload" title="Recharger pour tout le monde">⟳</button>
           <form id="urlForm"><input id="urlInput" placeholder="Cherche ou colle une adresse…" autocomplete="off" spellcheck="false"></form>
+          <button class="round small" id="btnOpenAll" title="Ouvrir ce site dans le navigateur de chacun (pour les sites qui refusent l’affichage partagé)">↗</button>
           <label class="check" title="Tout le monde peut naviguer, pas seulement le pilote"><input type="checkbox" id="freeBrowse"> libre</label>
         </div>
         <div class="frame-wrap">
@@ -202,6 +203,11 @@
   </main>
 
   <div id="toasts" class="toasts"></div>
+  <div id="openBanner" class="open-banner hidden">
+    <span id="openBannerText"></span>
+    <a id="openBannerBtn" href="#" target="_blank" rel="noopener noreferrer">Ouvrir ↗</a>
+    <button id="openBannerClose" title="Ignorer">×</button>
+  </div>
   <div id="offline" class="offline hidden">Connexion perdue — reconnexion…</div>
   <div id="dropZone" class="dropzone hidden"><span>Déposer pour ouvrir ce fichier</span></div>
 </div>
