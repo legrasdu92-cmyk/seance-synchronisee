@@ -146,6 +146,29 @@ const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
+/** En-tetes d'un vrai Chrome, pour ne pas etre bloque par les filtres qui
+ *  rejettent une requete trop nue. Ceci ne resout aucun defi anti-robot
+ *  (Cloudflare & co restent hors de portee d'un proxy serveur) : ca aide
+ *  seulement les sites a protection legere a nous laisser passer. */
+function browserHeaders(u, referer) {
+  return {
+    'User-Agent': UA,
+    Accept:
+      'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-CH-UA': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    'Sec-CH-UA-Mobile': '?0',
+    'Sec-CH-UA-Platform': '"Windows"',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': referer ? 'same-origin' : 'none',
+    'Sec-Fetch-User': '?1',
+    ...(referer ? { Referer: referer } : {}),
+  };
+}
+
 const COLORS = ['#f97316', '#22d3ee', '#a78bfa', '#34d399', '#f472b6', '#facc15', '#60a5fa', '#fb7185'];
 
 const VIDEO_EXT = new Set(['.mp4', '.m4v', '.webm', '.ogv', '.ogg', '.mov', '.mkv']);
@@ -862,7 +885,7 @@ function proxyAllowed(key) {
   return b.n <= PROXY_RATE.perMinute;
 }
 
-function fetchUpstream(rawUrl, depth, cb) {
+function fetchUpstream(rawUrl, depth, cb, referer) {
   if (depth > 6) return cb(new Error('trop de redirections'));
   let u;
   try {
@@ -874,23 +897,15 @@ function fetchUpstream(rawUrl, depth, cb) {
 
   checkHost(u, (herr) => {
     if (herr) return cb(herr);
-    fetchChecked(u, depth, cb);
+    fetchChecked(u, depth, cb, referer);
   });
 }
 
-function fetchChecked(u, depth, cb) {
+function fetchChecked(u, depth, cb, referer) {
   const lib = u.protocol === 'https:' ? https : http;
   const r = lib.request(
     u,
-    {
-      method: 'GET',
-      headers: {
-        'User-Agent': UA,
-        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8',
-        'Accept-Encoding': 'gzip, deflate, br',
-      },
-    },
+    { method: 'GET', headers: browserHeaders(u, referer) },
     (up) => {
       const code = up.statusCode || 0;
       if ([301, 302, 303, 307, 308].includes(code) && up.headers.location) {
@@ -901,7 +916,8 @@ function fetchChecked(u, depth, cb) {
         } catch (_) {
           return cb(new Error('redirection invalide'));
         }
-        return fetchUpstream(next, depth + 1, cb);
+        // Le referer devient l'origine d'ou l'on vient : plus credible.
+        return fetchUpstream(next, depth + 1, cb, u.origin + '/');
       }
       cb(null, { up, finalUrl: u.href });
     }
@@ -984,6 +1000,61 @@ function proxyErrorPage(res, message, url) {
   res.end(body);
 }
 
+/** Ecran affiche quand un site refuse le proxy (mur anti-robot, connexion
+ *  exigee...). Plutot que la page rouge brute du service de protection, on
+ *  explique et on propose d'ouvrir le site dans son propre onglet - ou la
+ *  seance sert alors d'horloge et de chat. */
+function proxyBlockedPage(res, finalUrl, reason) {
+  const safe = escapeAttr(finalUrl);
+  const body = Buffer.from(
+    '<!doctype html><meta charset="utf-8"><style>' +
+      'body{margin:0;font:15px/1.6 system-ui,Segoe UI,sans-serif;background:#0b0f17;color:#e2e8f0;' +
+      'display:flex;align-items:center;justify-content:center;min-height:100vh;text-align:center}' +
+      '.card{max-width:540px;padding:40px 32px}h1{font-size:20px;margin:0 0 6px}' +
+      '.sub{color:#94a3b8;font-size:13px;margin:0 0 22px}code{color:#94a3b8;word-break:break-all;font-size:12px}' +
+      'a.btn{display:inline-block;margin:6px 0 18px;padding:11px 20px;border-radius:10px;background:#f97316;' +
+      'color:#0b0f17;font-weight:600;text-decoration:none}p.tip{color:#94a3b8;font-size:13px}' +
+      '</style><div class="card">' +
+      '<div style="font-size:34px;margin-bottom:10px">🛡️</div>' +
+      '<h1>Ce site refuse la navigation partagée</h1>' +
+      '<p class="sub">' + escapeAttr(reason) + '</p>' +
+      '<a class="btn" href="' + safe + '" target="_blank" rel="noopener noreferrer">Ouvrir dans mon onglet ↗</a>' +
+      '<p class="tip">Ouvrez-le chacun de votre côté : la séance reste votre horloge commune et votre chat.</p>' +
+      '<p><code>' + safe + '</code></p>' +
+      '</div>',
+    'utf8'
+  );
+  // 200 : c'est une page valide dans l'iframe, pas une erreur du proxy.
+  res.writeHead(200, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Content-Length': body.length,
+    'Cache-Control': 'no-store',
+  });
+  res.end(body);
+}
+
+/** Un site nous bloque-t-il activement ? Signatures des murs anti-robot les
+ *  plus courants (Cloudflare, etc.) et des refus d'acces. */
+function detectBlock(up, buf) {
+  const code = up.statusCode || 0;
+  const server = String(up.headers['server'] || '').toLowerCase();
+  const cfMitigated = up.headers['cf-mitigated'] === 'challenge';
+  if (cfMitigated) return 'Protection anti-robot (Cloudflare) : elle exige un test que seul un vrai navigateur peut passer.';
+  if (code === 403 || code === 429 || code === 503) {
+    const head = buf ? buf.slice(0, 4000).toString('latin1').toLowerCase() : '';
+    if (
+      server.includes('cloudflare') ||
+      /just a moment|attention required|cf-ray|challenge-platform|enable javascript and cookies|checking your browser/.test(head)
+    ) {
+      return 'Protection anti-robot : ce site bloque les accès qui ne viennent pas d’un navigateur classique.';
+    }
+    if (code === 403) return 'Accès refusé (403) : ce site n’autorise pas ce type d’accès.';
+    if (code === 429) return 'Trop de requêtes (429) : ce site nous limite temporairement.';
+    if (code === 503) return 'Service indisponible (503) : ce site est protégé ou surchargé.';
+  }
+  return null;
+}
+
 function handleProxy(req, res, url, appOrigin) {
   const target = normalizeUrl(url.searchParams.get('url'));
   if (!target) return proxyErrorPage(res, 'URL invalide.', url.searchParams.get('url'));
@@ -993,6 +1064,13 @@ function handleProxy(req, res, url, appOrigin) {
     const { up, finalUrl } = out;
     const ct = String(up.headers['content-type'] || '');
     const isHtml = /text\/html|application\/xhtml/i.test(ct) || !ct;
+
+    // Blocage detectable avant meme de lire le corps (ex. Cloudflare challenge).
+    const earlyBlock = detectBlock(up, null);
+    if (earlyBlock && !isHtml) {
+      up.resume();
+      return proxyBlockedPage(res, finalUrl, earlyBlock);
+    }
 
     const headers = {
       'Cache-Control': 'no-store',
@@ -1019,6 +1097,9 @@ function handleProxy(req, res, url, appOrigin) {
 
     decodeBody(up, (e2, buf) => {
       if (e2) return proxyErrorPage(res, 'Reponse illisible : ' + e2.message, finalUrl);
+      // Mur anti-robot renvoye en HTML : on montre l'ecran clair, pas la page brute.
+      const blocked = detectBlock(up, buf);
+      if (blocked) return proxyBlockedPage(res, finalUrl, blocked);
       let text;
       try {
         text = new TextDecoder(charsetOf(ct, buf), { fatal: false }).decode(buf);
