@@ -129,6 +129,10 @@
       var d = JSON.parse(e.data);
       if (window.__onOpenTab) window.__onOpenTab(d.url, d.by);
     });
+    es.addEventListener('pull', function (e) {
+      var d = JSON.parse(e.data);
+      if (window.__answerPull) window.__answerPull(d.reqId, d.start, d.end);
+    });
     es.addEventListener('cursor', function (e) {
       var d = JSON.parse(e.data);
       S.cursors[d.id] = { x: d.x, y: d.y, name: d.name, color: d.color, ts: Date.now() };
@@ -222,6 +226,10 @@
     if (media.kind === 'file') return '/media/file?p=' + encodeURIComponent(media.src);
     if (media.kind === 'local') return S.localFile ? S.localFile.url : null;
     if (media.kind === 'hosted') return '/host-file?room=' + encodeURIComponent(S.room) + '&v=' + encodeURIComponent(media.src);
+    if (media.kind === 'stream') {
+      if (S.streamFile && S.streamUrl) return S.streamUrl; // l'hôte : sa copie locale
+      return '/host-stream?room=' + encodeURIComponent(S.room) + '&v=' + encodeURIComponent(media.src);
+    }
     return media.src;
   }
 
@@ -237,6 +245,7 @@
     if (media.kind === 'file') return 'fichier partagé par l’hôte';
     if (media.kind === 'local') return 'chacun sa copie · ' + bytes(media.size);
     if (media.kind === 'hosted') return 'diffusé par l\'hôte · ' + bytes(media.size);
+    if (media.kind === 'stream') return 'en direct depuis l\'hôte · ' + bytes(media.size);
     if (media.kind === 'youtube') return 'YouTube';
     return 'lien direct';
   }
@@ -1047,6 +1056,35 @@
     if (f) uploadHostFile(f);
   };
 
+  // Diffusion en direct : l'hôte garde le fichier et répond aux demandes de
+  // tranches. Aucune limite de taille, rien n'est envoyé d'avance.
+  if ($('hostStreamInput')) $('hostStreamInput').onchange = function () {
+    var file = this.files && this.files[0];
+    this.value = '';
+    if (!file) return;
+    if (S.streamUrl) { try { URL.revokeObjectURL(S.streamUrl); } catch (e) {} }
+    S.streamFile = file;
+    S.streamUrl = URL.createObjectURL(file);
+    send({ type: 'provideFile', name: file.name, size: file.size });
+    toast('Diffusion en direct lancée. Garde cet onglet ouvert.', null, 5000);
+    closeLib();
+  };
+
+  // Réponse à une demande de tranche : on lit le morceau du fichier et on le
+  // renvoie tel quel au serveur, qui le relaie au participant qui l'attend.
+  function answerPull(reqId, start, end) {
+    if (!S.streamFile) return;
+    var blob = S.streamFile.slice(start, end + 1);
+    blob.arrayBuffer().then(function (buf) {
+      return fetch('/host-chunk?room=' + encodeURIComponent(S.room) + '&id=' + encodeURIComponent(reqId), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: buf,
+      });
+    }).catch(function () {});
+  }
+  window.__answerPull = answerPull;
+
   function uploadHostFile(file) {
     var maxMb = (S.cfg && S.cfg.hostUploadMaxMb) || 800;
     if (file.size > maxMb * 1024 * 1024) {
@@ -1220,7 +1258,11 @@
       if (cfg.canHostUpload && $('hostUploadBlock')) {
         $('hostUploadBlock').classList.remove('hidden');
         if ($('hostHint')) $('hostHint').textContent =
-          'Idéal si tu es le seul à avoir le fichier (max ' + (cfg.hostUploadMaxMb || 800) + ' Mo).';
+          'Envoi complet : idéal jusqu\'à ' + (cfg.hostUploadMaxMb || 800) + ' Mo ; une fois envoyé tu peux fermer.';
+      }
+      if (cfg.canHostStream && $('hostStreamRow')) {
+        $('hostUploadBlock').classList.remove('hidden');
+        $('hostStreamRow').classList.remove('hidden');
       }
 
       $('roomLabel').firstChild.textContent = 'Code de séance ';

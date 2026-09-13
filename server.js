@@ -252,6 +252,12 @@ function newRoom(id) {
     play: { playing: false, position: 0, anchor: Date.now(), rate: 1 },
     web: { history: [], index: -1, nonce: 0, scroll: { x: 0, y: 0 }, free: false },
     rev: 0,
+    // Diffusion en direct : l'hote garde le fichier sur son appareil et le
+    // serveur ne relaie que les tranches demandees (aucun stockage, aucune
+    // limite de taille). `stream` decrit la source vive du moment.
+    stream: null, // { by, name, size, mime, token }
+    pulls: new Map(), // reqId -> { res, start, end, size, mime, timer }
+    pullSeq: 0,
   };
 }
 
@@ -310,6 +316,22 @@ function sse(res, event, data) {
     res.write('event: ' + event + '\ndata: ' + JSON.stringify(data) + '\n\n');
   } catch (_) {
     /* connexion fermee */
+  }
+}
+
+/** Fin de la diffusion en direct : la source (l'hote) est partie ou a coupe.
+ *  On libere les demandes de tranches en attente et on retire le media vif. */
+function endStream(room) {
+  if (!room.stream) return;
+  for (const [, p] of room.pulls) {
+    clearTimeout(p.timer);
+    try { p.res.writeHead(504, { 'Content-Type': 'text/plain' }); p.res.end('source partie'); } catch (_) {}
+  }
+  room.pulls.clear();
+  room.stream = null;
+  if (room.media && room.media.kind === 'stream') {
+    room.media = null;
+    setPaused(room, 0);
   }
 }
 
@@ -474,6 +496,7 @@ function handleEvent(room, client, msg) {
       room.duration = 0;
       room.pendingPlay = false;
       room.stalled.clear();
+      if (room.stream && room.stream.by === client.id) endStream(room);
       for (const c of room.clients.values()) {
         c.ready = false;
         c.error = null;
@@ -482,6 +505,26 @@ function handleEvent(room, client, msg) {
       setPaused(room, 0);
       pushState(room);
       system(room, client.name + ' a ferme la video.');
+      break;
+    }
+    case 'provideFile': {
+      // L'hote met a disposition un fichier de son appareil, diffuse en direct
+      // tranche par tranche. Aucune limite de taille, rien n'est stocke.
+      const name = String(msg.name || 'video').slice(0, 200);
+      const size = Number(msg.size) || 0;
+      if (!size) break;
+      const ext = path.extname(name).toLowerCase();
+      const mime = MIME[ext] || 'video/mp4';
+      const token = String(Date.now());
+      room.stream = { by: client.id, name, size, mime, token };
+      room.media = { kind: 'stream', src: token, title: name, size };
+      room.duration = 0;
+      room.stalled.clear();
+      for (const c of room.clients.values()) { c.ready = false; c.error = null; c.hasFile = true; }
+      setPaused(room, 0);
+      room.mode = 'cinema';
+      pushState(room);
+      system(room, client.name + ' diffuse ' + name + ' en direct depuis son appareil.');
       break;
     }
     case 'ready': {
@@ -1356,6 +1399,13 @@ const server = http.createServer((req, res) => {
       if (client.res !== res) return;
       room.clients.delete(client.id);
       room.stalled.delete(client.id);
+      // La source d'une diffusion en direct s'en va : on coupe proprement et on
+      // previent, plutot que de laisser les autres tourner dans le vide.
+      if (room.stream && room.stream.by === client.id) {
+        endStream(room);
+        pushState(room);
+        system(room, name + ' a quitté : la diffusion en direct est arrêtée.');
+      }
       if (room.clients.size === 0) {
         // En cloud, une seance vide survit plus longtemps : le code doit
         // rester valable si tout le monde se deconnecte un moment.
@@ -1407,6 +1457,9 @@ const server = http.createServer((req, res) => {
       // a fournir). En local c'est inutile (la mediatheque le fait deja).
       canHostUpload: CLOUD && HOST_UPLOAD,
       hostUploadMaxMb: Math.round(HOST_UPLOAD_MAX / 1024 / 1024),
+      // Diffusion en direct depuis l'appareil de l'hote : aucune limite de
+      // taille, rien n'est stocke (l'hote garde l'onglet ouvert).
+      canHostStream: CLOUD,
     });
   }
 
@@ -1455,6 +1508,73 @@ const server = http.createServer((req, res) => {
   if (p === '/host-file') {
     const roomId = sanitizeRoom(url.searchParams.get('room'));
     return serveFileRange(req, res, hostFilePath(roomId), hostFileType(roomId));
+  }
+
+  // Diffusion EN DIRECT : le lecteur d'un participant demande une tranche ; le
+  // serveur la reclame a l'hote (source vive) et relaie sa reponse. Rien n'est
+  // stocke, aucune limite de taille. Chaque tranche est bornee pour rester
+  // "petit a petit".
+  if (p === '/host-stream') {
+    const room = rooms.get(sanitizeRoom(url.searchParams.get('room')));
+    if (!room || !room.stream) return json(res, 404, { error: 'pas de diffusion en direct' });
+    const { size, mime } = room.stream;
+    const SLICE = 4 * 1024 * 1024; // 4 Mo par tranche relayee
+    let start = 0, end = size - 1;
+    const rh = req.headers.range && /^bytes=(\d*)-(\d*)$/.exec(req.headers.range.trim());
+    if (rh) {
+      start = rh[1] ? parseInt(rh[1], 10) : 0;
+      end = rh[2] ? parseInt(rh[2], 10) : size - 1;
+    }
+    if (Number.isNaN(start) || start >= size || start < 0) {
+      res.writeHead(416, { 'Content-Range': 'bytes */' + size });
+      return res.end();
+    }
+    end = Math.min(end, size - 1, start + SLICE - 1); // borne la tranche
+    const headers = {
+      'Content-Type': mime,
+      'Accept-Ranges': 'bytes',
+      'Cache-Control': 'no-store',
+      'Content-Range': 'bytes ' + start + '-' + end + '/' + size,
+      'Content-Length': end - start + 1,
+      'Access-Control-Allow-Origin': '*',
+    };
+    if (req.method === 'HEAD') { res.writeHead(206, headers); return res.end(); }
+
+    const provider = room.clients.get(room.stream.by);
+    if (!provider) { endStream(room); return json(res, 502, { error: 'source indisponible' }); }
+    const reqId = 'p' + (++room.pullSeq);
+    const timer = setTimeout(() => {
+      if (room.pulls.has(reqId)) {
+        room.pulls.delete(reqId);
+        try { res.writeHead(504, { 'Content-Type': 'text/plain' }); res.end('tranche non fournie a temps'); } catch (_) {}
+      }
+    }, 25000);
+    room.pulls.set(reqId, { res, headers, timer });
+    // Si le lecteur abandonne cette requete (seek), on oublie la tranche.
+    req.on('close', () => { if (room.pulls.has(reqId)) { clearTimeout(timer); room.pulls.delete(reqId); } });
+    sse(provider.res, 'pull', { reqId, start, end });
+    return;
+  }
+
+  // L'hote renvoie les octets d'une tranche demandee (corps binaire brut).
+  if (p === '/host-chunk' && req.method === 'POST') {
+    const room = rooms.get(sanitizeRoom(url.searchParams.get('room')));
+    const reqId = String(url.searchParams.get('id') || '');
+    if (!room) { req.resume(); return json(res, 404, { error: 'salle inconnue' }); }
+    const pull = room.pulls.get(reqId);
+    if (!pull) { req.resume(); return json(res, 200, { ok: false }); } // demande deja abandonnee
+    room.pulls.delete(reqId);
+    clearTimeout(pull.timer);
+    try {
+      pull.res.writeHead(206, pull.headers);
+    } catch (_) {
+      req.resume();
+      return json(res, 200, { ok: false });
+    }
+    req.pipe(pull.res);
+    req.on('end', () => { try { json(res, 200, { ok: true }); } catch (_) {} });
+    req.on('error', () => { try { pull.res.end(); } catch (_) {} });
+    return;
   }
 
   // Cree une seance avec un code non devinable (mode cloud).
