@@ -133,6 +133,10 @@
       var d = JSON.parse(e.data);
       if (window.__answerPull) window.__answerPull(d.reqId, d.start, d.end);
     });
+    es.addEventListener('countdown', function (e) {
+      var d = JSON.parse(e.data);
+      runCountdown(d.at, d.label);
+    });
     es.addEventListener('cursor', function (e) {
       var d = JSON.parse(e.data);
       S.cursors[d.id] = { x: d.x, y: d.y, name: d.name, color: d.color, ts: Date.now() };
@@ -727,6 +731,34 @@
     return '&room=' + encodeURIComponent(S.room || '') + '&who=' + encodeURIComponent(S.clientId || '');
   }
 
+  // Top depart synchronise : l'instant "at" est en heure serveur ; grace a
+  // l'horloge partagee, le GO tombe au meme instant pour tout le monde.
+  var countdownTimer = null;
+  function runCountdown(at, label) {
+    clearInterval(countdownTimer);
+    $('countdown').classList.remove('hidden');
+    $('countdownLabel').textContent = label || 'Lancez la lecture ensemble';
+    var num = $('countdownNum');
+    function tick() {
+      var remain = at - Clock.now();
+      if (remain > 0) {
+        num.classList.remove('go');
+        num.textContent = String(Math.ceil(remain / 1000));
+        num.style.animation = 'none'; void num.offsetWidth; num.style.animation = '';
+      } else if (remain > -1500) {
+        num.classList.add('go');
+        num.textContent = '▶ GO';
+        $('countdownLabel').textContent = label || 'Lancez la lecture maintenant !';
+      } else {
+        clearInterval(countdownTimer);
+        $('countdown').classList.add('hidden');
+      }
+    }
+    tick();
+    countdownTimer = setInterval(tick, 100);
+  }
+  $('countdown').onclick = function () { clearInterval(countdownTimer); this.classList.add('hidden'); };
+
   function proxyOrigin() {
     var h = location.hostname;
     if (h === 'localhost') return location.protocol + '//127.0.0.1:' + location.port;
@@ -747,7 +779,8 @@
     if (d && d.__cbaction === 'openAll' && d.url) {
       window.open(d.url, '_blank', 'noopener');
       send({ type: 'openTab', url: d.url });
-      toast('Proposé à tout le monde : chacun a un bouton pour l\'ouvrir.');
+      toast('Proposé à tous. Quand chacun l\'a ouvert, lance le top départ.', null, 6000);
+      if (window.__onOpenTab) window.__onOpenTab(d.url, null, true);
       return;
     }
     if (!d || d.__cb !== 1) return;
@@ -946,17 +979,22 @@
     var timer = null;
     function hide() { $('openBanner').classList.add('hidden'); }
     $('openBannerClose').onclick = hide;
+    if ($('openBannerCountdown')) $('openBannerCountdown').onclick = function () {
+      send({ type: 'countdown', seconds: 3, label: 'Lancez la lecture ensemble' });
+    };
     $('openBannerBtn').onclick = function () { setTimeout(hide, 100); };
     // Chaque participant recoit la proposition : un clic (= geste utilisateur,
     // requis par le navigateur) ouvre le site dans son propre onglet.
-    window.__onOpenTab = function (url, by) {
+    window.__onOpenTab = function (url, by, keep) {
       var host = url;
       try { host = new URL(url).host; } catch (e) {}
       $('openBannerText').textContent = (by ? by + ' propose : ' : 'À ouvrir : ') + host;
       $('openBannerBtn').href = url;
       $('openBanner').classList.remove('hidden');
       clearTimeout(timer);
-      timer = setTimeout(hide, 30000);
+      // Chez le pilote (keep) on laisse la barre : c'est de là qu'il lance le
+      // top départ une fois que tout le monde a ouvert le site.
+      if (!keep) timer = setTimeout(hide, 45000);
     };
   })();
   $('freeBrowse').onchange = function () { send({ type: 'freeBrowsing', on: this.checked }); };

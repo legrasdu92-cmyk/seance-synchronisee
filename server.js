@@ -656,6 +656,20 @@ function handleEvent(room, client, msg) {
       pushState(room);
       break;
     }
+    case 'countdown': {
+      // Top depart synchronise : pour regarder ensemble sur un site que le
+      // proxy ne peut pas piloter (chacun a ouvert l'episode dans son navigateur).
+      // On fixe un instant commun sur l'horloge partagee ; tout le monde lance
+      // la lecture au meme moment.
+      if (!canDrive(room, client)) {
+        sse(client.res, 'toast', { text: 'Seul le pilote peut lancer le top départ.', tone: 'warn' });
+        break;
+      }
+      const secs = Math.min(10, Math.max(2, Number(msg.seconds) || 3));
+      const at = Date.now() + secs * 1000;
+      broadcast(room, 'countdown', { at, by: client.name, label: String(msg.label || '').slice(0, 80) });
+      break;
+    }
     case 'openTab': {
       // Ouvrir chez tout le monde : pour les sites qu'un proxy ne peut pas
       // servir (anti-robot, connexion...). Chaque participant ouvre le site

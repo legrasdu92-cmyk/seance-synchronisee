@@ -399,3 +399,15 @@ button.wide { width: 100%; }
 /* Barre de progression (envoi du film de l'hote) */
 .progress { height: 8px; border-radius: 6px; background: rgba(255,255,255,.1); overflow: hidden; }
 .progress-fill { height: 100%; width: 0; background: #f97316; transition: width .2s ease; }
+
+/* Top départ synchronisé (regarder ensemble sur un site externe) */
+.countdown { position: fixed; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center;
+  background: rgba(4,7,13,.82); backdrop-filter: blur(4px); }
+.countdown-inner { text-align: center; }
+.countdown-num { font-size: 140px; font-weight: 800; line-height: 1; color: #f97316;
+  text-shadow: 0 8px 40px rgba(249,115,22,.5); animation: pop .9s ease; }
+.countdown-num.go { color: #34d399; font-size: 96px; }
+.countdown-label { margin-top: 14px; font-size: 17px; color: #e6ebf5; }
+@keyframes pop { from { transform: scale(.6); opacity: .3; } to { transform: scale(1); opacity: 1; } }
+.open-banner #openBannerCountdown { flex: none; background: transparent; border: 1px solid rgba(52,211,153,.5);
+  color: #6ee7b7; border-radius: 8px; padding: 7px 12px; font-weight: 600; cursor: pointer; }
