@@ -1842,4 +1842,18 @@ server.listen(PORT, () => {
       }
     } catch (_) {}
   }
+
+  // Anti-mise en veille : sur un hebergement gratuit, le service s'endort apres
+  // ~15 min sans visite et la premiere ouverture suivante attend ~30 s. En se
+  // pingeant lui-meme toutes les 10 min via son URL publique (le trafic sortant
+  // revient en entrant, ce qui compte comme une visite), il reste chaud et se
+  // charge tout de suite. RENDER_EXTERNAL_URL est fourni par Render.
+  const self = process.env.RENDER_EXTERNAL_URL || process.env.KEEP_WARM_URL;
+  if (CLOUD && self) {
+    const base = self.replace(/\/$/, '');
+    setInterval(() => {
+      try { https.get(base + '/config', (r) => r.resume()).on('error', () => {}); } catch (_) {}
+    }, 10 * 60 * 1000);
+    console.log('  Anti-veille actif : ping ' + base + '/config toutes les 10 min');
+  }
 });
